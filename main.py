@@ -30,12 +30,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # MetaTrader 5 Credentials
-MT5_LOGIN = int(os.getenv("MT5_LOGIN", 123456))
-MT5_PASSWORD = os.getenv("MT5_PASSWORD", "your_password")
-MT5_SERVER = os.getenv("MT5_SERVER", "your_server")
+MT5_LOGIN = 8930488
+MT5_PASSWORD = "LiusPro123_"
+MT5_SERVER = "HFMarketsGlobal-Demo"
 
 # Telegram Configuration
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = "8040654533:AAEMZmRFP75DbfhclicAI8HHtgsGqgJVIZ8"
 
 # Trading Parameters
 TIMEFRAME = mt5.TIMEFRAME_M5
