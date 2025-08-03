@@ -700,7 +700,31 @@ async def cancel_conversation(update: Update, context) -> int:
 
 
 async def monitor_command(update: Update, context) -> None:
-    """Displays an inline keyboard for the user to select symbols to monitor."""
+    """
+    Adds a symbol to the monitoring list via text command,
+    or displays an inline keyboard for the user to select symbols to monitor.
+    """
+    chat_id = update.message.chat_id
+    # Check if the command was used with an argument (e.g., /monitor BTCUSD)
+    if context.args:
+        symbol = context.args[0].upper()
+        # Initialize list if not present
+        if chat_id not in monitored_pairs:
+            monitored_pairs[chat_id] = []
+
+        # Add symbol if not already there
+        if symbol not in monitored_pairs[chat_id]:
+            monitored_pairs[chat_id].append(symbol)
+            logger.info(f"Added {symbol} to monitor list for chat_id {chat_id}")
+            await update.message.reply_text(
+                f"✅ Added **{symbol}** to your monitoring list.\n"
+                f"I will check for signals every 5 minutes."
+            , parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"ℹ️ You are already monitoring {symbol}.")
+        return
+
+    # If no argument, show the buttons (existing functionality)
     keyboard = [
         [
             InlineKeyboardButton("EURUSD", callback_data='monitor_EURUSD'),
@@ -717,7 +741,7 @@ async def monitor_command(update: Update, context) -> None:
         [InlineKeyboardButton("Done", callback_data='monitor_done')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('Choose symbols to add to your monitoring list:', reply_markup=reply_markup)
+    await update.message.reply_text('Choose symbols to add to your monitoring list, or use `/monitor SYMBOL`:', reply_markup=reply_markup)
 
 
 async def unmonitor_command(update: Update, context) -> None:
