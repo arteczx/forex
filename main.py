@@ -3,10 +3,9 @@ import pandas as pd
 import numpy as np
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Updater,
+    Application,
     CommandHandler,
     CallbackQueryHandler,
-    CallbackContext,
     ConversationHandler,
     MessageHandler,
     filters,
@@ -14,6 +13,7 @@ from telegram.ext import (
 import time
 import os
 import logging
+import asyncio
 
 # States for conversation
 (
@@ -380,7 +380,7 @@ def place_market_order(signal_type: str, symbol: str, lot_size: float, sl_price:
 
 # --- Telegram Command Handlers ---
 
-def start(update: Update, context: CallbackContext) -> None:
+async def start(update: Update, context) -> None:
     """Sends a welcome message when the /start command is issued."""
     user = update.effective_user
     welcome_message = (
@@ -400,22 +400,22 @@ def start(update: Update, context: CallbackContext) -> None:
         "🔹 /help - Show this help message again.\n\n"
         "When a signal is received and auto-trade is off, you will see buttons to manually execute the trade."
     )
-    update.message.reply_text(welcome_message)
+    await update.message.reply_text(welcome_message)
 
-def help_command(update: Update, context: CallbackContext) -> None:
+async def help_command(update: Update, context) -> None:
     """Sends help message."""
-    start(update, context)
+    await start(update, context)
 
-def autotrade_on(update: Update, context: CallbackContext) -> None:
+async def autotrade_on(update: Update, context) -> None:
     """Enables auto-trading for the user."""
     chat_id = update.message.chat_id
     if chat_id not in user_settings:
         user_settings[chat_id] = {}
     user_settings[chat_id]['auto_trade'] = True
     logger.info(f"Auto-trading enabled for chat_id: {chat_id}")
-    update.message.reply_text("🤖 Auto-trading has been **ENABLED**. I will now execute trades automatically with a lot size of 0.01.")
+    await update.message.reply_text("🤖 Auto-trading has been **ENABLED**. I will now execute trades automatically with a lot size of 0.01.")
 
-def autotrade_off(update: Update, context: CallbackContext) -> None:
+async def autotrade_off(update: Update, context) -> None:
     """Disables auto-trading for the user."""
     chat_id = update.message.chat_id
     if chat_id in user_settings:
@@ -424,33 +424,33 @@ def autotrade_off(update: Update, context: CallbackContext) -> None:
     else:
         user_settings[chat_id] = {'auto_trade': False}
     logger.info(f"Auto-trading disabled for chat_id: {chat_id}")
-    update.message.reply_text("🤖 Auto-trading has been **DISABLED**. I will ask for confirmation before placing trades.")
+    await update.message.reply_text("🤖 Auto-trading has been **DISABLED**. I will ask for confirmation before placing trades.")
 
-def autotrade_status(update: Update, context: CallbackContext) -> None:
+async def autotrade_status(update: Update, context) -> None:
     """Checks the current auto-trading status for the user."""
     chat_id = update.message.chat_id
     status = user_settings.get(chat_id, {}).get('auto_trade', False)
     if status:
-        update.message.reply_text("🤖 Auto-trading is currently **ENABLED**.")
+        await update.message.reply_text("🤖 Auto-trading is currently **ENABLED**.")
     else:
-        update.message.reply_text("🤖 Auto-trading is currently **DISABLED**.")
+        await update.message.reply_text("🤖 Auto-trading is currently **DISABLED**.")
 
 
-def account_status(update: Update, context: CallbackContext) -> None:
+async def account_status(update: Update, context) -> None:
     """Displays the current MetaTrader account status."""
     if not mt5.terminal_state().connected:
         if not initialize_mt5():
-            update.message.reply_text("❌ Could not connect to the trading server. Please try again later.")
+            await update.message.reply_text("❌ Could not connect to the trading server. Please try again later.")
             return
 
     account_info = mt5.account_info()
     if not account_info:
-        update.message.reply_text("❌ Failed to retrieve account information.")
+        await update.message.reply_text("❌ Failed to retrieve account information.")
         return
 
     positions = mt5.positions_get()
     if positions is None:
-        update.message.reply_text("❌ Failed to retrieve open positions. The connection might have been lost.")
+        await update.message.reply_text("❌ Failed to retrieve open positions. The connection might have been lost.")
         return
 
     num_positions = len(positions)
@@ -465,23 +465,23 @@ def account_status(update: Update, context: CallbackContext) -> None:
         f"{pnl_icon} **Total PnL:** {total_pnl:.2f} {account_info.currency}"
     )
 
-    update.message.reply_text(message, parse_mode='Markdown')
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 
-def pnl_command(update: Update, context: CallbackContext) -> None:
+async def pnl_command(update: Update, context) -> None:
     """Starts the conversation to check PnL for a specific order."""
     if not mt5.terminal_state().connected:
         if not initialize_mt5():
-            update.message.reply_text("❌ Could not connect to the trading server. Please try again later.")
+            await update.message.reply_text("❌ Could not connect to the trading server. Please try again later.")
             return
 
     positions = mt5.positions_get()
     if positions is None:
-        update.message.reply_text("❌ Failed to retrieve open positions. The connection might have been lost.")
+        await update.message.reply_text("❌ Failed to retrieve open positions. The connection might have been lost.")
         return
 
     if not positions:
-        update.message.reply_text("ℹ️ You have no open orders to check.")
+        await update.message.reply_text("ℹ️ You have no open orders to check.")
         return
 
     keyboard = []
@@ -492,29 +492,29 @@ def pnl_command(update: Update, context: CallbackContext) -> None:
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text("Please select an order to check its PnL:", reply_markup=reply_markup)
+    await update.message.reply_text("Please select an order to check its PnL:", reply_markup=reply_markup)
 
 
-def pnl_callback(update: Update, context: CallbackContext) -> None:
+async def pnl_callback(update: Update, context) -> None:
     """Handles the PnL button press and shows details for a specific order."""
     query = update.callback_query
-    query.answer()
+    await query.answer()
 
     try:
         _, ticket_str = query.data.split('_')
         ticket = int(ticket_str)
     except (ValueError, IndexError):
-        query.edit_message_text("❌ Invalid callback data.")
+        await query.edit_message_text("❌ Invalid callback data.")
         return
 
     if not mt5.terminal_state().connected:
         if not initialize_mt5():
-            query.edit_message_text("❌ Could not connect to the trading server.")
+            await query.edit_message_text("❌ Could not connect to the trading server.")
             return
 
     positions = mt5.positions_get(ticket=ticket)
     if not positions:
-        query.edit_message_text(f"❌ Could not find order with ticket {ticket}. It might have been closed.")
+        await query.edit_message_text(f"❌ Could not find order with ticket {ticket}. It might have been closed.")
         return
 
     pos = positions[0]
@@ -538,13 +538,13 @@ def pnl_callback(update: Update, context: CallbackContext) -> None:
         f"{pnl_icon} **Profit/Loss:** {pos.profit:.2f} {currency}"
     )
 
-    query.edit_message_text(text=message, parse_mode='Markdown')
+    await query.edit_message_text(text=message, parse_mode='Markdown')
 
 
-def trade_callback(update: Update, context: CallbackContext) -> int:
+async def trade_callback(update: Update, context) -> int:
     """Handles the 'BUY' or 'SELL' button press to start the trade conversation."""
     query = update.callback_query
-    query.answer()
+    await query.answer()
 
     # e.g., 'trade_buy_EURUSD'
     _, trade_type, symbol = query.data.split('_')
@@ -554,7 +554,7 @@ def trade_callback(update: Update, context: CallbackContext) -> int:
     signal = check_and_get_signal(symbol)
 
     if not signal or signal['type'].lower() != trade_type:
-        query.edit_message_text(text="⚠️ The signal has expired or conditions have changed. Please request a new signal analysis.")
+        await query.edit_message_text(text="⚠️ The signal has expired or conditions have changed. Please request a new signal analysis.")
         return ConversationHandler.END
 
     # Store the validated signal data in user_data for the next step
@@ -562,7 +562,7 @@ def trade_callback(update: Update, context: CallbackContext) -> int:
     logger.info(f"User {query.from_user.id} initiated {trade_type} for {symbol}. Asking for lot size.")
 
     # Edit the original message to ask for lot size
-    query.edit_message_text(
+    await query.edit_message_text(
         text=f"You've initiated a **{trade_type.upper()}** for **{symbol}**.\n\n"
              f"Please enter the lot size you wish to use (e.g., `0.01`, `0.1`).\n\n"
              f"Type /cancel to abort."
@@ -571,13 +571,13 @@ def trade_callback(update: Update, context: CallbackContext) -> int:
     return ASKING_LOT_SIZE
 
 
-def lot_size_input(update: Update, context: CallbackContext) -> int:
+async def lot_size_input(update: Update, context) -> int:
     """Receives lot size, places the order, and ends the conversation."""
     lot_size_str = update.message.text
     signal = context.user_data.get('trade_signal')
 
     if not signal:
-        update.message.reply_text("❌ An error occurred: I've lost the context of the trade. Please start over by requesting a new signal.")
+        await update.message.reply_text("❌ An error occurred: I've lost the context of the trade. Please start over by requesting a new signal.")
         return ConversationHandler.END
 
     try:
@@ -586,14 +586,14 @@ def lot_size_input(update: Update, context: CallbackContext) -> int:
         if lot_size <= 0:
             raise ValueError("Lot size must be a positive number.")
     except ValueError:
-        update.message.reply_text(
+        await update.message.reply_text(
             "⚠️ Invalid lot size. Please enter a positive number (e.g., `0.01`).\n\n"
             "Or type /cancel to abort."
         )
         return ASKING_LOT_SIZE # Ask again without ending the conversation
 
     logger.info(f"User {update.effective_user.id} entered lot size {lot_size}. Placing order.")
-    update.message.reply_text(f"⏳ Understood. Placing a **{signal['type']}** order for **{signal['symbol']}** with lot size **{lot_size}**...")
+    await update.message.reply_text(f"⏳ Understood. Placing a **{signal['type']}** order for **{signal['symbol']}** with lot size **{lot_size}**...")
 
     # Execute the trade
     trade_result = place_market_order(
@@ -604,7 +604,7 @@ def lot_size_input(update: Update, context: CallbackContext) -> int:
         tp_price=signal['tp']
     )
 
-    update.message.reply_text(trade_result, parse_mode='Markdown')
+    await update.message.reply_text(trade_result, parse_mode='Markdown')
 
     # Clean up the user_data to free memory
     if 'trade_signal' in context.user_data:
@@ -613,7 +613,7 @@ def lot_size_input(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 
-def signal_command(update: Update, context: CallbackContext) -> int:
+async def signal_command(update: Update, context) -> int:
     """Displays an inline keyboard for the user to select a symbol for a one-time signal. Starts the conversation."""
     keyboard = [
         [
@@ -631,24 +631,24 @@ def signal_command(update: Update, context: CallbackContext) -> int:
         [InlineKeyboardButton("Custom Pair", callback_data='signal_custom')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text('Please choose a symbol to get a signal for, or choose "Custom":', reply_markup=reply_markup)
+    await update.message.reply_text('Please choose a symbol to get a signal for, or choose "Custom":', reply_markup=reply_markup)
     return CHOOSING_SIGNAL
 
 
-def signal_button_callback(update: Update, context: CallbackContext) -> int:
+async def signal_button_callback(update: Update, context) -> int:
     """Handles button presses for the signal command, gets signal, and shows trade buttons."""
     query = update.callback_query
-    query.answer()
+    await query.answer()
 
     action, *data = query.data.split('_', 1)
     symbol = data[0] if data else None
 
     if symbol == 'custom':
-        query.edit_message_text(text="Please send me the symbol you want to analyze (e.g., EURUSD, BTCUSD).")
+        await query.edit_message_text(text="Please send me the symbol you want to analyze (e.g., EURUSD, BTCUSD).")
         return TYPING_CUSTOM_SIGNAL
 
     if symbol:
-        query.edit_message_text(text=f"⏳ Analyzing {symbol}, please wait...")
+        await query.edit_message_text(text=f"⏳ Analyzing {symbol}, please wait...")
         # get_signal_for_symbol now returns (message, signal_object)
         signal_message, signal_data = get_signal_for_symbol(symbol)
 
@@ -661,19 +661,19 @@ def signal_button_callback(update: Update, context: CallbackContext) -> int:
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            query.edit_message_text(text=signal_message, reply_markup=reply_markup)
+            await query.edit_message_text(text=signal_message, reply_markup=reply_markup)
         else:
             # If no signal, just show the message
-            query.edit_message_text(text=signal_message)
+            await query.edit_message_text(text=signal_message)
 
     return ConversationHandler.END
 
 
-def custom_signal_input(update: Update, context: CallbackContext) -> int:
+async def custom_signal_input(update: Update, context) -> int:
     """Handles custom symbol input, gets signal, and shows trade buttons."""
     symbol = update.message.text.upper()
 
-    update.message.reply_text(f"⏳ Analyzing {symbol}, please wait...")
+    await update.message.reply_text(f"⏳ Analyzing {symbol}, please wait...")
     signal_message, signal_data = get_signal_for_symbol(symbol)
 
     if signal_data:
@@ -685,21 +685,21 @@ def custom_signal_input(update: Update, context: CallbackContext) -> int:
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        update.message.reply_text(text=signal_message, reply_markup=reply_markup)
+        await update.message.reply_text(text=signal_message, reply_markup=reply_markup)
     else:
         # If no signal, just show the message
-        update.message.reply_text(text=signal_message)
+        await update.message.reply_text(text=signal_message)
 
     return ConversationHandler.END
 
 
-def cancel_conversation(update: Update, context: CallbackContext) -> int:
+async def cancel_conversation(update: Update, context) -> int:
     """Cancels and ends the conversation."""
-    update.message.reply_text('Operation cancelled.')
+    await update.message.reply_text('Operation cancelled.')
     return ConversationHandler.END
 
 
-def monitor_command(update: Update, context: CallbackContext) -> None:
+async def monitor_command(update: Update, context) -> None:
     """Displays an inline keyboard for the user to select symbols to monitor."""
     keyboard = [
         [
@@ -717,26 +717,26 @@ def monitor_command(update: Update, context: CallbackContext) -> None:
         [InlineKeyboardButton("Done", callback_data='monitor_done')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text('Choose symbols to add to your monitoring list:', reply_markup=reply_markup)
+    await update.message.reply_text('Choose symbols to add to your monitoring list:', reply_markup=reply_markup)
 
 
-def unmonitor_command(update: Update, context: CallbackContext) -> None:
+async def unmonitor_command(update: Update, context) -> None:
     """Displays an inline keyboard of currently monitored symbols for the user to remove."""
     chat_id = update.message.chat_id
     user_monitored_pairs = monitored_pairs.get(chat_id, [])
 
     if not user_monitored_pairs:
-        update.message.reply_text("You are not monitoring any pairs yet. Use /monitor to add some.")
+        await update.message.reply_text("You are not monitoring any pairs yet. Use /monitor to add some.")
         return
 
     keyboard = [[InlineKeyboardButton(symbol, callback_data=f'unmonitor_{symbol}')] for symbol in user_monitored_pairs]
     keyboard.append([InlineKeyboardButton("Done", callback_data='unmonitor_done')])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text('Choose symbols to remove from your monitoring list:', reply_markup=reply_markup)
+    await update.message.reply_text('Choose symbols to remove from your monitoring list:', reply_markup=reply_markup)
 
 
-def monitoring_command(update: Update, context: CallbackContext) -> None:
+async def monitoring_command(update: Update, context) -> None:
     """Lists the symbols the user is currently monitoring."""
     chat_id = update.message.chat_id
     user_monitored_pairs = monitored_pairs.get(chat_id, [])
@@ -746,13 +746,13 @@ def monitoring_command(update: Update, context: CallbackContext) -> None:
     else:
         message = "You are currently monitoring the following pairs:\n" + "\n".join(f"• {s}" for s in user_monitored_pairs)
 
-    update.message.reply_text(message)
+    await update.message.reply_text(message)
 
 
-def button_callback(update: Update, context: CallbackContext) -> None:
+async def button_callback(update: Update, context) -> None:
     """Parses the CallbackQuery and runs the appropriate action."""
     query = update.callback_query
-    query.answer()  # Acknowledge the button press
+    await query.answer()  # Acknowledge the button press
 
     action, *data = query.data.split('_', 1)
     symbol = data[0] if data else None
@@ -760,7 +760,7 @@ def button_callback(update: Update, context: CallbackContext) -> None:
 
     if action == 'monitor':
         if symbol == 'done':
-            query.edit_message_text(text="Your monitoring list has been updated.")
+            await query.edit_message_text(text="Your monitoring list has been updated.")
             return
 
         # Initialize list if not present
@@ -770,35 +770,35 @@ def button_callback(update: Update, context: CallbackContext) -> None:
         # Add symbol if not already there
         if symbol not in monitored_pairs[chat_id]:
             monitored_pairs[chat_id].append(symbol)
-            query.answer(text=f"✅ Added {symbol} to your monitoring list.")
+            await query.answer(text=f"✅ Added {symbol} to your monitoring list.")
         else:
-            query.answer(text=f"ℹ️ You are already monitoring {symbol}.")
+            await query.answer(text=f"ℹ️ You are already monitoring {symbol}.")
 
     elif action == 'unmonitor':
         if symbol == 'done':
-            query.edit_message_text(text="Your monitoring list has been updated.")
+            await query.edit_message_text(text="Your monitoring list has been updated.")
             return
 
         if chat_id in monitored_pairs and symbol in monitored_pairs[chat_id]:
             monitored_pairs[chat_id].remove(symbol)
-            query.answer(text=f"❌ Removed {symbol} from your monitoring list.")
+            await query.answer(text=f"❌ Removed {symbol} from your monitoring list.")
             # Refresh the keyboard
             user_monitored_pairs = monitored_pairs.get(chat_id, [])
             if not user_monitored_pairs:
-                query.edit_message_text("You are no longer monitoring any pairs.")
+                await query.edit_message_text("You are no longer monitoring any pairs.")
             else:
                 keyboard = [[InlineKeyboardButton(s, callback_data=f'unmonitor_{s}')] for s in user_monitored_pairs]
                 keyboard.append([InlineKeyboardButton("Done", callback_data='unmonitor_done')])
                 reply_markup = InlineKeyboardMarkup(keyboard)
-                query.edit_message_text('Choose symbols to remove:', reply_markup=reply_markup)
+                await query.edit_message_text('Choose symbols to remove:', reply_markup=reply_markup)
         else:
-            query.answer(text=f"ℹ️ You are not monitoring {symbol}.")
+            await query.answer(text=f"ℹ️ You are not monitoring {symbol}.")
 
     else:
-        query.edit_message_text(text=f"Unknown action: {action}")
+        await query.edit_message_text(text=f"Unknown action: {action}")
 
 
-def check_all_monitored_pairs_job(context: CallbackContext) -> None:
+async def check_all_monitored_pairs_job(context) -> None:
     """
     This job iterates through all monitored pairs, checks for signals, and then
     either executes a trade automatically or sends a notification with options.
@@ -831,7 +831,7 @@ def check_all_monitored_pairs_job(context: CallbackContext) -> None:
                         )
                         # Notify the user about the auto-trade
                         auto_trade_message = f"🤖 **Auto-Trade Executed** for {symbol}.\n\n{trade_result}"
-                        context.bot.send_message(chat_id=chat_id, text=auto_trade_message)
+                        await context.bot.send_message(chat_id=chat_id, text=auto_trade_message)
                     else:
                         # Manual trade: send signal with action buttons
                         message = format_signal_message(signal)
@@ -842,7 +842,7 @@ def check_all_monitored_pairs_job(context: CallbackContext) -> None:
                             ]
                         ]
                         reply_markup = InlineKeyboardMarkup(keyboard)
-                        context.bot.send_message(chat_id=chat_id, text=message, reply_markup=reply_markup)
+                        await context.bot.send_message(chat_id=chat_id, text=message, reply_markup=reply_markup)
 
                     logger.info(f"Sent signal for {symbol} to chat_id {chat_id} (Auto-Trade: {is_auto_trade})")
 
@@ -861,30 +861,24 @@ def main() -> None:
         # For this example, we'll let it run to allow user interaction,
         # but signal-related commands will fail.
 
-    # Create the Updater and pass it your bot's token.
+    # Create the Application and pass it your bot's token.
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
         logger.error("Telegram Bot Token is not configured. Please set the TELEGRAM_BOT_TOKEN environment variable.")
         return
 
-    updater = Updater(TELEGRAM_BOT_TOKEN)
-
-    # Get the dispatcher to register handlers
-    dispatcher = updater.dispatcher
-
-    # Get the dispatcher to register handlers
-    dispatcher = updater.dispatcher
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Add command handlers
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("help", help_command))
-    dispatcher.add_handler(CommandHandler("monitor", monitor_command))
-    dispatcher.add_handler(CommandHandler("unmonitor", unmonitor_command))
-    dispatcher.add_handler(CommandHandler("monitoring", monitoring_command))
-    dispatcher.add_handler(CommandHandler("autotrade_on", autotrade_on))
-    dispatcher.add_handler(CommandHandler("autotrade_off", autotrade_off))
-    dispatcher.add_handler(CommandHandler("autotrade_status", autotrade_status))
-    dispatcher.add_handler(CommandHandler("status", account_status))
-    dispatcher.add_handler(CommandHandler("pnl", pnl_command))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("monitor", monitor_command))
+    application.add_handler(CommandHandler("unmonitor", unmonitor_command))
+    application.add_handler(CommandHandler("monitoring", monitoring_command))
+    application.add_handler(CommandHandler("autotrade_on", autotrade_on))
+    application.add_handler(CommandHandler("autotrade_off", autotrade_off))
+    application.add_handler(CommandHandler("autotrade_status", autotrade_status))
+    application.add_handler(CommandHandler("status", account_status))
+    application.add_handler(CommandHandler("pnl", pnl_command))
 
     # Set up the conversation handler for the /signal command
     conv_handler = ConversationHandler(
@@ -896,13 +890,13 @@ def main() -> None:
         fallbacks=[CommandHandler('cancel', cancel_conversation)],
         per_message=False
     )
-    dispatcher.add_handler(conv_handler)
+    application.add_handler(conv_handler)
 
     # This handler processes button clicks for monitoring
-    dispatcher.add_handler(CallbackQueryHandler(button_callback, pattern='^(monitor|unmonitor)_'))
+    application.add_handler(CallbackQueryHandler(button_callback, pattern='^(monitor|unmonitor)_'))
 
     # This handler processes PnL button clicks
-    dispatcher.add_handler(CallbackQueryHandler(pnl_callback, pattern='^pnl_'))
+    application.add_handler(CallbackQueryHandler(pnl_callback, pattern='^pnl_'))
 
     # Set up the conversation handler for placing trades
     trade_conv_handler = ConversationHandler(
@@ -913,26 +907,27 @@ def main() -> None:
         fallbacks=[CommandHandler('cancel', cancel_conversation)],
         per_message=False # Make sure conversation is on a per-user basis
     )
-    dispatcher.add_handler(trade_conv_handler)
+    application.add_handler(trade_conv_handler)
 
     # Schedule the monitoring job
-    job_queue = updater.job_queue
+    job_queue = application.job_queue
     # Run the job every 5 minutes (300 seconds)
     job_queue.run_repeating(check_all_monitored_pairs_job, interval=300, first=10)
     logger.info("Scheduled monitoring job to run every 5 minutes.")
 
     # Start the Bot
-    updater.start_polling()
+    application.run_polling()
     logger.info("Bot has started successfully.")
 
-    # Run the bot until you press Ctrl-C or the process receives SIGINT,
-    # SIGTERM or SIGABRT. This should be used most of the time, since
-    # start_polling() is non-blocking and will stop the bot gracefully.
-    updater.idle()
+    # Run the bot until the user presses Ctrl-C
+    # application.run_until_disconnected() # This is for webhook based bots mostly
 
     # Shutdown MT5 connection when the bot is stopped
-    mt5.shutdown()
-    logger.info("MetaTrader 5 connection shut down.")
+    # This part is tricky, as run_polling is blocking.
+    # A proper shutdown sequence would require more complex signal handling.
+    # For now, we rely on the user stopping the script.
+    # mt5.shutdown()
+    # logger.info("MetaTrader 5 connection shut down.")
 
 if __name__ == '__main__':
     main()
