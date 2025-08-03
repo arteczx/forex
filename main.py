@@ -152,6 +152,8 @@ def check_buy_signal(symbol, ha_df, rates_df, pip_size):
     is_bullish_cross = (prev_ha_candle['fast_ma'] <= prev_ha_candle['slow_ma'] and
                        last_closed_ha_candle['fast_ma'] > last_closed_ha_candle['slow_ma'])
     is_ha_green = last_closed_ha_candle['close'] > last_closed_ha_candle['open']
+    # A strong buy signal candle has no lower wick.
+    is_strong_buy_candle = last_closed_ha_candle['open'] == last_closed_ha_candle['low']
 
     # Breakout is now a point of interest, not a strict condition.
     breakout_poi = is_resistance_broken(rates_df)
@@ -160,7 +162,7 @@ def check_buy_signal(symbol, ha_df, rates_df, pip_size):
         reason += " (Resistance Break POI)"
 
 
-    if is_bullish_cross and is_ha_green:
+    if is_bullish_cross and is_ha_green and is_strong_buy_candle:
         if last_signal_timestamps.get(symbol) != last_closed_ha_candle['time']:
             last_signal_timestamps[symbol] = last_closed_ha_candle['time']
             signal_price = last_closed_raw_candle['close']
@@ -187,6 +189,8 @@ def check_sell_signal(symbol, ha_df, rates_df, pip_size):
     is_bearish_cross = (prev_ha_candle['fast_ma'] >= prev_ha_candle['slow_ma'] and
                        last_closed_ha_candle['fast_ma'] < last_closed_ha_candle['slow_ma'])
     is_ha_red = last_closed_ha_candle['close'] < last_closed_ha_candle['open']
+    # A strong sell signal candle has no upper wick.
+    is_strong_sell_candle = last_closed_ha_candle['open'] == last_closed_ha_candle['high']
 
     # Support breakout is a point of interest, not a strict condition
     breakout_poi = is_support_broken(rates_df)
@@ -194,7 +198,7 @@ def check_sell_signal(symbol, ha_df, rates_df, pip_size):
     if breakout_poi:
         reason += " (Support Break POI)"
 
-    if is_bearish_cross and is_ha_red:
+    if is_bearish_cross and is_ha_red and is_strong_sell_candle:
         if last_signal_timestamps.get(symbol) != last_closed_ha_candle['time']:
             last_signal_timestamps[symbol] = last_closed_ha_candle['time']
             signal_price = last_closed_raw_candle['close']
