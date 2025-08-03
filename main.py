@@ -239,8 +239,17 @@ def check_and_get_signal(symbol):
         logger.warning(f"Not enough data to analyze {symbol} for a signal.")
         return None
 
+    # Calculate indicators on the raw price data first
+    rates_df_with_indicators = calculate_indicators(rates_df.copy())
+
+    # Now, calculate Heikin Ashi candles from the original rates_df
     ha_df = calculate_heikin_ashi(rates_df.copy())
-    ha_df = calculate_indicators(ha_df)
+
+    # Add the indicators from the raw data to the Heikin Ashi dataframe
+    # This keeps the HA candle structure but uses the correct MA values for checks
+    ha_df['fast_ma'] = rates_df_with_indicators['fast_ma']
+    ha_df['slow_ma'] = rates_df_with_indicators['slow_ma']
+
 
     symbol_info = mt5.symbol_info(symbol)
     if not symbol_info:
