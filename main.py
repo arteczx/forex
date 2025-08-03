@@ -49,10 +49,23 @@ monitored_pairs = {}
 # Tracks the timestamp of the last signal candle for each symbol to avoid duplicates
 # { 'SYMBOL': timestamp }
 last_signal_timestamps = {}
-# {chat_id: {'auto_trade': False}}
+# {chat_id: {'auto_trade': False, 'mode': 'ha_ma'}}
 user_settings = {}
 
 # --- Function Definitions ---
+
+def get_user_settings(chat_id: int) -> dict:
+    """Gets or creates the settings for a user, with defaults."""
+    if chat_id not in user_settings:
+        user_settings[chat_id] = {
+            'auto_trade': False,
+            'mode': 'ha_ma'  # Default mode
+        }
+    # Ensure 'mode' exists for older users who might be in the dictionary already
+    elif 'mode' not in user_settings[chat_id]:
+        user_settings[chat_id]['mode'] = 'ha_ma'
+    return user_settings[chat_id]
+
 
 def initialize_mt5():
     """Initializes and connects to the MetaTrader 5 terminal."""
@@ -190,7 +203,8 @@ def check_buy_signal(symbol, ha_df, rates_df, pip_size):
             signal_info = {
                 'type': 'BUY', 'symbol': symbol, 'price': signal_price,
                 'sl': sl_price, 'tp': tp_price, 'time': last_closed_ha_candle['time'],
-                'reason': reason
+                'reason': reason,
+                'mode': 'ha_ma'  # Identify signal mode
             }
             signal_info['exits'] = get_exit_strategies(ha_df, 'BUY')
             return signal_info
@@ -227,52 +241,143 @@ def check_sell_signal(symbol, ha_df, rates_df, pip_size):
             signal_info = {
                 'type': 'SELL', 'symbol': symbol, 'price': signal_price,
                 'sl': sl_price, 'tp': tp_price, 'time': last_closed_ha_candle['time'],
-                'reason': reason
+                'reason': reason,
+                'mode': 'ha_ma'  # Identify signal mode
             }
             signal_info['exits'] = get_exit_strategies(ha_df, 'SELL')
             return signal_info
     return None
 
-def check_and_get_signal(symbol):
-    """
-    Performs the core signal analysis for a symbol by checking for buy and sell signals.
-    Returns a dictionary with signal details if a new signal is found, otherwise None.
-    """
-    # Increased count to have enough data for pattern analysis
-    rates_df = get_price_data(symbol, TIMEFRAME, count=200)
-    if rates_df is None or rates_df.empty or len(rates_df) < SLOW_MA_PERIOD + 50: # Increased buffer
-        logger.warning(f"Not enough data to analyze {symbol} for a signal.")
+
+def check_buy_signal_pure_ha(symbol, ha_df, rates_df, pip_size):
+    """Checks for a buy signal based on pure Heikin Ashi reversal."""
+    if len(ha_df) < 3:  # Need at least previous and last closed candle
         return None
 
-    # Calculate indicators on the raw price data first
-    rates_df_with_indicators = calculate_indicators(rates_df.copy())
+    prev_ha_candle = ha_df.iloc[-3]
+    last_closed_ha_candle = ha_df.iloc[-2]
+    last_closed_raw_candle = rates_df.iloc[-2]
+    sl_buffer = 10 * pip_size
 
-    # Now, calculate Heikin Ashi candles from the original rates_df
-    ha_df = calculate_heikin_ashi(rates_df.copy())
+    is_ha_green = last_closed_ha_candle['close'] > last_closed_ha_candle['open']
+    # A strong buy signal candle has no lower wick.
+    is_strong_buy_candle = last_closed_ha_candle['open'] == last_closed_ha_candle['low']
+    was_prev_ha_red = prev_ha_candle['close'] < prev_ha_candle['open']
 
-    # Add the indicators from the raw data to the Heikin Ashi dataframe
-    # This keeps the HA candle structure but uses the correct MA values for checks
-    ha_df['fast_ma'] = rates_df_with_indicators['fast_ma']
-    ha_df['slow_ma'] = rates_df_with_indicators['slow_ma']
+    reason = "Pure Heikin Ashi Reversal"
+
+    if is_ha_green and is_strong_buy_candle and was_prev_ha_red:
+        # Use a unique key for pure HA signals to avoid conflicts with MA signals
+        if last_signal_timestamps.get(f"{symbol}_pure_ha") != last_closed_ha_candle['time']:
+            last_signal_timestamps[f"{symbol}_pure_ha"] = last_closed_ha_candle['time']
+            signal_price = last_closed_raw_candle['close']
+            # Place SL below the low of the signal candle
+            sl_price = last_closed_raw_candle['low'] - sl_buffer
+            risk = signal_price - sl_price
+            tp_price = signal_price + (risk * RISK_REWARD_RATIO)
+
+            signal_info = {
+                'type': 'BUY', 'symbol': symbol, 'price': signal_price,
+                'sl': sl_price, 'tp': tp_price, 'time': last_closed_ha_candle['time'],
+                'reason': reason,
+                'mode': 'pure_ha'  # Identify signal mode
+            }
+            # Simplified exits for this mode
+            exits = {'conservative_exit': "Close if Heikin Ashi candle color flips."}
+            signal_info['exits'] = exits
+            return signal_info
+    return None
 
 
+def check_sell_signal_pure_ha(symbol, ha_df, rates_df, pip_size):
+    """Checks for a sell signal based on pure Heikin Ashi reversal."""
+    if len(ha_df) < 3:
+        return None
+
+    prev_ha_candle = ha_df.iloc[-3]
+    last_closed_ha_candle = ha_df.iloc[-2]
+    last_closed_raw_candle = rates_df.iloc[-2]
+    sl_buffer = 10 * pip_size
+
+    is_ha_red = last_closed_ha_candle['close'] < last_closed_ha_candle['open']
+    # A strong sell signal candle has no upper wick.
+    is_strong_sell_candle = last_closed_ha_candle['open'] == last_closed_ha_candle['high']
+    was_prev_ha_green = prev_ha_candle['close'] > prev_ha_candle['open']
+
+    reason = "Pure Heikin Ashi Reversal"
+
+    if is_ha_red and is_strong_sell_candle and was_prev_ha_green:
+        # Use a unique key for pure HA signals to avoid conflicts with MA signals
+        if last_signal_timestamps.get(f"{symbol}_pure_ha") != last_closed_ha_candle['time']:
+            last_signal_timestamps[f"{symbol}_pure_ha"] = last_closed_ha_candle['time']
+            signal_price = last_closed_raw_candle['close']
+            # Place SL above the high of the signal candle
+            sl_price = last_closed_raw_candle['high'] + sl_buffer
+            risk = sl_price - signal_price
+            tp_price = signal_price - (risk * RISK_REWARD_RATIO)
+
+            signal_info = {
+                'type': 'SELL', 'symbol': symbol, 'price': signal_price,
+                'sl': sl_price, 'tp': tp_price, 'time': last_closed_ha_candle['time'],
+                'reason': reason,
+                'mode': 'pure_ha'  # Identify signal mode
+            }
+            # Simplified exits for this mode
+            exits = {'conservative_exit': "Close if Heikin Ashi candle color flips."}
+            signal_info['exits'] = exits
+            return signal_info
+    return None
+
+
+def check_and_get_signal(symbol):
+    """
+    Performs the core signal analysis for a symbol.
+    It checks for all available signal types (MA cross, pure HA) and returns a
+    list of all valid signals found.
+    """
+    signals = []
+    # Increased count to have enough data for pattern analysis
+    rates_df = get_price_data(symbol, TIMEFRAME, count=200)
+    if rates_df is None or rates_df.empty or len(rates_df) < SLOW_MA_PERIOD + 50:  # Increased buffer
+        logger.warning(f"Not enough data to analyze {symbol} for a signal.")
+        return signals
+
+    # --- Common Data Preparation ---
     symbol_info = mt5.symbol_info(symbol)
     if not symbol_info:
         logger.warning(f"Could not get info for {symbol}")
-        return None
+        return signals
     pip_size = symbol_info.point
 
-    # Check for buy signal
-    buy_signal = check_buy_signal(symbol, ha_df, rates_df, pip_size)
-    if buy_signal:
-        return buy_signal
+    # Calculate Heikin Ashi candles from the original rates_df
+    ha_df = calculate_heikin_ashi(rates_df.copy())
 
-    # Check for sell signal
-    sell_signal = check_sell_signal(symbol, ha_df, rates_df, pip_size)
-    if sell_signal:
-        return sell_signal
+    # --- Mode 1: HA + MA Crossover Analysis ---
+    # Calculate indicators on the raw price data first
+    rates_df_with_indicators = calculate_indicators(rates_df.copy())
+    # Add the indicators to the Heikin Ashi dataframe for checking
+    ha_df_with_ma = ha_df.copy()
+    ha_df_with_ma['fast_ma'] = rates_df_with_indicators['fast_ma']
+    ha_df_with_ma['slow_ma'] = rates_df_with_indicators['slow_ma']
 
-    return None # No new signal found
+    buy_signal_ha_ma = check_buy_signal(symbol, ha_df_with_ma, rates_df, pip_size)
+    if buy_signal_ha_ma:
+        signals.append(buy_signal_ha_ma)
+
+    sell_signal_ha_ma = check_sell_signal(symbol, ha_df_with_ma, rates_df, pip_size)
+    if sell_signal_ha_ma:
+        signals.append(sell_signal_ha_ma)
+
+    # --- Mode 2: Pure Heikin Ashi Analysis ---
+    buy_signal_pure_ha = check_buy_signal_pure_ha(symbol, ha_df, rates_df, pip_size)
+    if buy_signal_pure_ha:
+        signals.append(buy_signal_pure_ha)
+
+    sell_signal_pure_ha = check_sell_signal_pure_ha(symbol, ha_df, rates_df, pip_size)
+    if sell_signal_pure_ha:
+        signals.append(sell_signal_pure_ha)
+
+    return signals
 
 
 def format_signal_message(signal_dict: dict) -> str:
@@ -299,25 +404,36 @@ def format_signal_message(signal_dict: dict) -> str:
     return message
 
 
-def get_signal_for_symbol(symbol: str) -> str:
+def get_signal_for_symbol(symbol: str, chat_id: int) -> tuple[str, dict | None]:
     """
     Wrapper function for the /signal command.
-    Analyzes a single symbol and returns a signal message or a 'no signal' message.
+    Analyzes a single symbol, filters for the user's mode, and returns a signal
+    message or a 'no signal' message.
     """
     # Ensure MT5 is connected before proceeding
     if not mt5.terminal_info().connected:
         if not initialize_mt5():
-            return "Error: Could not connect to the trading server. Please try again later."
+            return "Error: Could not connect to the trading server. Please try again later.", None
 
-    signal = check_and_get_signal(symbol)
-    if signal:
-        return format_signal_message(signal), signal # Return both message and raw signal
+    all_signals = check_and_get_signal(symbol)
+    user_mode = get_user_settings(chat_id).get('mode', 'ha_ma')
+
+    # Filter signals based on the user's chosen mode
+    filtered_signal = None
+    for signal in all_signals:
+        if signal.get('mode') == user_mode:
+            filtered_signal = signal
+            break  # Take the first matching signal for this user
+
+    if filtered_signal:
+        # Return both the formatted message and the raw signal data
+        return format_signal_message(filtered_signal), filtered_signal
     else:
         # Check for data availability to give a more informative message
         rates_df = get_price_data(symbol, TIMEFRAME, count=2)
         if rates_df is None or rates_df.empty:
             return f"Could not retrieve data for {symbol}. It might be an invalid symbol.", None
-        return f"No clear signal for {symbol} at the moment.", None
+        return f"No clear signal for {symbol} using your selected mode at the moment.", None
 
 
 def place_market_order(signal_type: str, symbol: str, lot_size: float, sl_price: float, tp_price: float) -> str:
@@ -422,6 +538,9 @@ async def help_command(update: Update, context) -> None:
         "🤖 /autotrade_on - Enable automatic trade execution (0.01 lot).\n"
         "🤖 /autotrade_off - Disable automatic trade execution.\n"
         "🤖 /autotrade_status - Check if auto-trading is on or off.\n\n"
+        "**Settings**\n"
+        "⚙️ /set_mode - Choose between different signal strategies.\n"
+        "ℹ️ /mode_status - Check your current signal strategy.\n\n"
         "You can always return to the main menu by sending /start."
     )
     keyboard = [[InlineKeyboardButton("⬅️ Back to Main Menu", callback_data='menu_start')]]
@@ -433,30 +552,51 @@ async def help_command(update: Update, context) -> None:
         await update.message.reply_text(text=help_message, reply_markup=reply_markup, parse_mode='Markdown')
 
 
+async def set_mode(update: Update, context) -> None:
+    """Displays an inline keyboard for the user to select a signal mode."""
+    keyboard = [
+        [InlineKeyboardButton("Mode 1: HA + MA Crossover", callback_data='mode_ha_ma')],
+        [InlineKeyboardButton("Mode 2: Pure Heikin Ashi", callback_data='mode_pure_ha')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text('Please choose your preferred signal mode:', reply_markup=reply_markup)
+
+
+async def mode_status(update: Update, context) -> None:
+    """Checks the current signal mode for the user."""
+    chat_id = update.message.chat_id
+    settings = get_user_settings(chat_id)
+    mode = settings.get('mode', 'ha_ma')  # Default for safety
+    if mode == 'ha_ma':
+        mode_description = "Mode 1: HA + MA Crossover"
+    else:
+        mode_description = "Mode 2: Pure Heikin Ashi"
+    await update.message.reply_text(f"Your current signal mode is set to:\n**{mode_description}**", parse_mode='Markdown')
+
+
 async def autotrade_on(update: Update, context) -> None:
     """Enables auto-trading for the user."""
     chat_id = update.message.chat_id
-    if chat_id not in user_settings:
-        user_settings[chat_id] = {}
-    user_settings[chat_id]['auto_trade'] = True
+    settings = get_user_settings(chat_id)
+    settings['auto_trade'] = True
     logger.info(f"Auto-trading enabled for chat_id: {chat_id}")
     await update.message.reply_text("🤖 Auto-trading has been **ENABLED**. I will now execute trades automatically with a lot size of 0.01.")
+
 
 async def autotrade_off(update: Update, context) -> None:
     """Disables auto-trading for the user."""
     chat_id = update.message.chat_id
-    if chat_id in user_settings:
-        user_settings[chat_id]['auto_trade'] = False
-    # Also handles cases where the user was never in the settings dict
-    else:
-        user_settings[chat_id] = {'auto_trade': False}
+    settings = get_user_settings(chat_id)
+    settings['auto_trade'] = False
     logger.info(f"Auto-trading disabled for chat_id: {chat_id}")
     await update.message.reply_text("🤖 Auto-trading has been **DISABLED**. I will ask for confirmation before placing trades.")
+
 
 async def autotrade_status(update: Update, context) -> None:
     """Checks the current auto-trading status for the user."""
     chat_id = update.message.chat_id
-    status = user_settings.get(chat_id, {}).get('auto_trade', False)
+    settings = get_user_settings(chat_id)
+    status = settings.get('auto_trade', False)
     if status:
         await update.message.reply_text("🤖 Auto-trading is currently **ENABLED**.")
     else:
@@ -573,20 +713,29 @@ async def trade_callback(update: Update, context) -> int:
     """Handles the 'BUY' or 'SELL' button press to start the trade conversation."""
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat_id
 
     # e.g., 'trade_buy_EURUSD'
     _, trade_type, symbol = query.data.split('_')
 
     # It's crucial to fetch the latest signal data right before the trade
     # to ensure prices (SL/TP) are as relevant as possible.
-    signal = check_and_get_signal(symbol)
+    all_signals = check_and_get_signal(symbol)
+    user_mode = get_user_settings(chat_id).get('mode', 'ha_ma')
 
-    if not signal or signal['type'].lower() != trade_type:
+    # Find a signal that matches the user's mode and the action they clicked
+    signal_to_trade = None
+    for s in all_signals:
+        if s['mode'] == user_mode and s['type'].lower() == trade_type:
+            signal_to_trade = s
+            break
+
+    if not signal_to_trade:
         await query.edit_message_text(text="⚠️ The signal has expired or conditions have changed. Please request a new signal analysis.")
         return ConversationHandler.END
 
     # Store the validated signal data in user_data for the next step
-    context.user_data['trade_signal'] = signal
+    context.user_data['trade_signal'] = signal_to_trade
     logger.info(f"User {query.from_user.id} initiated {trade_type} for {symbol}. Asking for lot size.")
 
     # Edit the original message to ask for lot size
@@ -674,6 +823,7 @@ async def signal_button_callback(update: Update, context) -> int:
     """Handles button presses for the signal command, gets signal, and shows trade buttons."""
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat_id
 
     action, *data = query.data.split('_', 1)
     symbol = data[0] if data else None
@@ -684,7 +834,7 @@ async def signal_button_callback(update: Update, context) -> int:
 
     if symbol:
         await query.edit_message_text(text=f"⏳ Analyzing {symbol}, please wait...")
-        signal_message, signal_data = get_signal_for_symbol(symbol)
+        signal_message, signal_data = get_signal_for_symbol(symbol, chat_id)
 
         if signal_data:
             # If there's a signal, show only the correct trade button
@@ -707,9 +857,10 @@ async def signal_button_callback(update: Update, context) -> int:
 async def custom_signal_input(update: Update, context) -> int:
     """Handles custom symbol input, gets signal, and shows trade buttons."""
     symbol = update.message.text.upper()
+    chat_id = update.message.chat_id
 
     await update.message.reply_text(f"⏳ Analyzing {symbol}, please wait...")
-    signal_message, signal_data = get_signal_for_symbol(symbol)
+    signal_message, signal_data = get_signal_for_symbol(symbol, chat_id)
 
     if signal_data:
         # If there's a signal, show only the correct trade button
@@ -909,10 +1060,44 @@ async def button_callback(update: Update, context) -> None:
         await query.edit_message_text(text=f"Unknown action: {action}")
 
 
+async def mode_callback(update: Update, context) -> None:
+    """Handles the mode selection button press."""
+    query = update.callback_query
+    await query.answer()
+
+    # e.g., 'mode_ha_ma' or 'mode_pure_ha'
+    try:
+        action, mode = query.data.split('_', 1)
+        if action != 'mode':
+            # Should not happen if pattern is correct, but good practice
+            return
+    except (ValueError, IndexError):
+        await query.edit_message_text("❌ Invalid callback data for mode selection.")
+        return
+
+    chat_id = query.message.chat_id
+    settings = get_user_settings(chat_id)
+    # The mode from callback will be 'ha_ma' or 'pure_ha'
+    settings['mode'] = mode
+
+    logger.info(f"User {chat_id} set signal mode to {mode}")
+
+    if mode == 'ha_ma':
+        mode_description = "Mode 1: HA + MA Crossover"
+    else:
+        mode_description = "Mode 2: Pure Heikin Ashi"
+
+    await query.edit_message_text(
+        f"✅ Your signal mode has been updated to:\n**{mode_description}**",
+        parse_mode='Markdown'
+    )
+
+
 async def check_all_monitored_pairs_job(context) -> None:
     """
-    This job iterates through all monitored pairs, checks for signals, and then
-    either executes a trade automatically or sends a notification with options.
+    This job iterates through all monitored pairs, checks for signals, filters
+    them based on each user's mode, and then either executes a trade
+    automatically or sends a notification.
     """
     if not mt5.terminal_info().connected:
         logger.warning("Job running, but MT5 is not connected. Attempting to reconnect.")
@@ -923,40 +1108,55 @@ async def check_all_monitored_pairs_job(context) -> None:
     logger.info("Running scheduled job: Checking all monitored pairs...")
 
     # Create a copy of the items to avoid issues if the dict is modified during iteration
+    # Get a unique list of all symbols being monitored to avoid re-checking the same symbol
+    all_symbols_to_check = set()
+    for symbols in monitored_pairs.values():
+        all_symbols_to_check.update(symbols)
+
+    # Check each symbol once and store the results
+    signals_by_symbol = {symbol: check_and_get_signal(symbol) for symbol in all_symbols_to_check}
+
     for chat_id, symbols in list(monitored_pairs.items()):
+        user_mode = get_user_settings(chat_id).get('mode', 'ha_ma')
         for symbol in symbols:
             try:
-                signal = check_and_get_signal(symbol)
-                if signal:
-                    # Check if the user has auto-trading enabled
-                    is_auto_trade = user_settings.get(chat_id, {}).get('auto_trade', False)
+                all_signals = signals_by_symbol.get(symbol, [])
+                if not all_signals:
+                    continue
 
-                    if is_auto_trade:
-                        logger.info(f"Auto-trading is ON for chat_id {chat_id}. Placing trade for {symbol}.")
-                        trade_result = place_market_order(
-                            signal_type=signal['type'],
-                            symbol=signal['symbol'],
-                            lot_size=0.01,
-                            sl_price=signal['sl'],
-                            tp_price=signal['tp']
-                        )
-                        # Notify the user about the auto-trade
-                        auto_trade_message = f"🤖 **Auto-Trade Executed** for {symbol}.\n\n{trade_result}"
-                        await context.bot.send_message(chat_id=chat_id, text=auto_trade_message)
-                    else:
-                        # Manual trade: send signal with the correct action button
-                        message = format_signal_message(signal)
-                        signal_type = signal['type']
-                        if signal_type == 'BUY':
-                            button = InlineKeyboardButton(f"📈 BUY {symbol}", callback_data=f"trade_buy_{symbol}")
-                        else: # SELL
-                            button = InlineKeyboardButton(f"📉 SELL {symbol}", callback_data=f"trade_sell_{symbol}")
+                # Filter signals for the current user's mode
+                for signal in all_signals:
+                    if signal.get('mode') == user_mode:
+                        # Found a matching signal, process it
+                        is_auto_trade = get_user_settings(chat_id).get('auto_trade', False)
 
-                        keyboard = [[button]]
-                        reply_markup = InlineKeyboardMarkup(keyboard)
-                        await context.bot.send_message(chat_id=chat_id, text=message, reply_markup=reply_markup)
+                        if is_auto_trade:
+                            logger.info(f"Auto-trading is ON for chat_id {chat_id}. Placing trade for {symbol}.")
+                            trade_result = place_market_order(
+                                signal_type=signal['type'],
+                                symbol=signal['symbol'],
+                                lot_size=0.01,
+                                sl_price=signal['sl'],
+                                tp_price=signal['tp']
+                            )
+                            auto_trade_message = f"🤖 **Auto-Trade Executed** for {symbol}.\n\n{trade_result}"
+                            await context.bot.send_message(chat_id=chat_id, text=auto_trade_message, parse_mode='Markdown')
+                        else:
+                            # Manual trade: send signal with the correct action button
+                            message = format_signal_message(signal)
+                            signal_type = signal['type']
+                            if signal_type == 'BUY':
+                                button = InlineKeyboardButton(f"📈 BUY {symbol}", callback_data=f"trade_buy_{symbol}")
+                            else:  # SELL
+                                button = InlineKeyboardButton(f"📉 SELL {symbol}", callback_data=f"trade_sell_{symbol}")
 
-                    logger.info(f"Sent signal for {symbol} to chat_id {chat_id} (Auto-Trade: {is_auto_trade})")
+                            keyboard = [[button]]
+                            reply_markup = InlineKeyboardMarkup(keyboard)
+                            await context.bot.send_message(chat_id=chat_id, text=message, reply_markup=reply_markup)
+
+                        logger.info(f"Sent signal for {symbol} to chat_id {chat_id} (Mode: {user_mode}, Auto-Trade: {is_auto_trade})")
+                        # Break after processing the first valid signal for this symbol/user combination
+                        break
 
             except Exception as e:
                 logger.error(f"Error checking signal for {symbol} for chat_id {chat_id}: {e}")
@@ -1001,6 +1201,8 @@ def main() -> None:
     application.add_handler(CommandHandler("monitor", monitor_command))
     application.add_handler(CommandHandler("unmonitor", unmonitor_command))
     application.add_handler(CommandHandler("monitoring", monitoring_command))
+    application.add_handler(CommandHandler("set_mode", set_mode))
+    application.add_handler(CommandHandler("mode_status", mode_status))
     application.add_handler(CommandHandler("autotrade_on", autotrade_on))
     application.add_handler(CommandHandler("autotrade_off", autotrade_off))
     application.add_handler(CommandHandler("autotrade_status", autotrade_status))
@@ -1027,6 +1229,9 @@ def main() -> None:
 
     # This handler processes button clicks for monitoring
     application.add_handler(CallbackQueryHandler(button_callback, pattern='^(monitor|unmonitor)_'))
+
+    # This handler processes button clicks for mode setting
+    application.add_handler(CallbackQueryHandler(mode_callback, pattern='^mode_'))
 
     # This handler processes PnL button clicks
     application.add_handler(CallbackQueryHandler(pnl_callback, pattern='^pnl_'))
