@@ -305,7 +305,7 @@ def get_signal_for_symbol(symbol: str) -> str:
     Analyzes a single symbol and returns a signal message or a 'no signal' message.
     """
     # Ensure MT5 is connected before proceeding
-    if not mt5.terminal_state().connected:
+    if not mt5.terminal_info().connected:
         if not initialize_mt5():
             return "Error: Could not connect to the trading server. Please try again later."
 
@@ -438,7 +438,7 @@ async def autotrade_status(update: Update, context) -> None:
 
 async def account_status(update: Update, context) -> None:
     """Displays the current MetaTrader account status."""
-    if not mt5.terminal_state().connected:
+    if not mt5.terminal_info().connected:
         if not initialize_mt5():
             await update.message.reply_text("❌ Could not connect to the trading server. Please try again later.")
             return
@@ -470,7 +470,7 @@ async def account_status(update: Update, context) -> None:
 
 async def pnl_command(update: Update, context) -> None:
     """Starts the conversation to check PnL for a specific order."""
-    if not mt5.terminal_state().connected:
+    if not mt5.terminal_info().connected:
         if not initialize_mt5():
             await update.message.reply_text("❌ Could not connect to the trading server. Please try again later.")
             return
@@ -507,7 +507,7 @@ async def pnl_callback(update: Update, context) -> None:
         await query.edit_message_text("❌ Invalid callback data.")
         return
 
-    if not mt5.terminal_state().connected:
+    if not mt5.terminal_info().connected:
         if not initialize_mt5():
             await query.edit_message_text("❌ Could not connect to the trading server.")
             return
@@ -803,7 +803,7 @@ async def check_all_monitored_pairs_job(context) -> None:
     This job iterates through all monitored pairs, checks for signals, and then
     either executes a trade automatically or sends a notification with options.
     """
-    if not mt5.terminal_state().connected:
+    if not mt5.terminal_info().connected:
         logger.warning("Job running, but MT5 is not connected. Attempting to reconnect.")
         if not initialize_mt5():
             logger.error("Job failed to reconnect to MT5. Skipping this run.")
