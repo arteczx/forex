@@ -589,13 +589,23 @@ async def autotrade_menu(update: Update, context) -> None:
 
 
 async def set_mode(update: Update, context) -> None:
-    """Displays an inline keyboard for the user to select a signal mode."""
+    """Displays an inline keyboard for the user to select a signal mode. Handles both commands and callbacks."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+
     keyboard = [
         [InlineKeyboardButton("Mode 1: HA + MA Crossover", callback_data='mode_ha_ma')],
         [InlineKeyboardButton("Mode 2: Pure Heikin Ashi", callback_data='mode_pure_ha')],
+        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data='menu_start')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('Please choose your preferred signal mode:', reply_markup=reply_markup)
+    text = 'Please choose your preferred signal mode:'
+
+    if query:
+        await query.edit_message_text(text=text, reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(text=text, reply_markup=reply_markup)
 
 
 async def mode_status(update: Update, context) -> None:
