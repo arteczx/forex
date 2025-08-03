@@ -2,10 +2,22 @@ import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
+from telegram.ext import (
+    Updater,
+    CommandHandler,
+    CallbackQueryHandler,
+    CallbackContext,
+    ConversationHandler,
+    MessageHandler,
+    Filters,
+)
 import time
 import os
 import logging
+
+# States for conversation
+CHOOSING_SIGNAL, TYPING_CUSTOM_SIGNAL = range(2)
+
 
 # --- Configuration ---
 # Enable logging
@@ -215,8 +227,8 @@ def help_command(update: Update, context: CallbackContext) -> None:
     start(update, context)
 
 
-def signal_command(update: Update, context: CallbackContext) -> None:
-    """Displays an inline keyboard for the user to select a symbol for a one-time signal."""
+def signal_command(update: Update, context: CallbackContext) -> int:
+    """Displays an inline keyboard for the user to select a symbol for a one-time signal. Starts the conversation."""
     keyboard = [
         [
             InlineKeyboardButton("EURUSD", callback_data='signal_EURUSD'),
@@ -230,9 +242,49 @@ def signal_command(update: Update, context: CallbackContext) -> None:
             InlineKeyboardButton("USDCAD", callback_data='signal_USDCAD'),
             InlineKeyboardButton("XAUUSD", callback_data='signal_XAUUSD'),  # Gold
         ],
+        [InlineKeyboardButton("Custom Pair", callback_data='signal_custom')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text('Please choose a symbol to get a signal for:', reply_markup=reply_markup)
+    update.message.reply_text('Please choose a symbol to get a signal for, or choose "Custom":', reply_markup=reply_markup)
+    return CHOOSING_SIGNAL
+
+
+def signal_button_callback(update: Update, context: CallbackContext) -> int:
+    """Handles button presses for the signal command."""
+    query = update.callback_query
+    query.answer()
+
+    action, *data = query.data.split('_', 1)
+    symbol = data[0] if data else None
+
+    if symbol == 'custom':
+        query.edit_message_text(text="Please send me the symbol you want to analyze (e.g., EURUSD, BTCUSD).")
+        return TYPING_CUSTOM_SIGNAL
+
+    if symbol:
+        query.edit_message_text(text=f"⏳ Analyzing {symbol}, please wait...")
+        signal_message = get_signal_for_symbol(symbol)
+        query.edit_message_text(text=signal_message)
+
+    return ConversationHandler.END
+
+
+def custom_signal_input(update: Update, context: CallbackContext) -> int:
+    """Handles the custom symbol input from the user."""
+    symbol = update.message.text.upper()
+    # Basic validation for symbol format can be added here if needed
+
+    update.message.reply_text(f"⏳ Analyzing {symbol}, please wait...")
+    signal_message = get_signal_for_symbol(symbol)
+    update.message.reply_text(text=signal_message)
+
+    return ConversationHandler.END
+
+
+def cancel_conversation(update: Update, context: CallbackContext) -> int:
+    """Cancels and ends the conversation."""
+    update.message.reply_text('Operation cancelled.')
+    return ConversationHandler.END
 
 
 def monitor_command(update: Update, context: CallbackContext) -> None:
@@ -294,12 +346,7 @@ def button_callback(update: Update, context: CallbackContext) -> None:
     symbol = data[0] if data else None
     chat_id = query.message.chat_id
 
-    if action == 'signal':
-        query.edit_message_text(text=f"⏳ Analyzing {symbol}, please wait...")
-        signal_message = get_signal_for_symbol(symbol)
-        query.edit_message_text(text=signal_message)
-
-    elif action == 'monitor':
+    if action == 'monitor':
         if symbol == 'done':
             query.edit_message_text(text="Your monitoring list has been updated.")
             return
@@ -386,15 +433,30 @@ def main() -> None:
     # Get the dispatcher to register handlers
     dispatcher = updater.dispatcher
 
-    # on different commands - answer in Telegram
+    # Get the dispatcher to register handlers
+    dispatcher = updater.dispatcher
+
+    # Add command handlers
     dispatcher.add_handler(CommandHandler("start", start))
     dispatcher.add_handler(CommandHandler("help", help_command))
-    dispatcher.add_handler(CommandHandler("signal", signal_command))
     dispatcher.add_handler(CommandHandler("monitor", monitor_command))
     dispatcher.add_handler(CommandHandler("unmonitor", unmonitor_command))
     dispatcher.add_handler(CommandHandler("monitoring", monitoring_command))
-    # This handler will process all button clicks from inline keyboards
-    dispatcher.add_handler(CallbackQueryHandler(button_callback))
+
+    # Set up the conversation handler for the /signal command
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('signal', signal_command)],
+        states={
+            CHOOSING_SIGNAL: [CallbackQueryHandler(signal_button_callback, pattern='^signal_')],
+            TYPING_CUSTOM_SIGNAL: [MessageHandler(Filters.text & ~Filters.command, custom_signal_input)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_conversation)],
+        per_message=False
+    )
+    dispatcher.add_handler(conv_handler)
+
+    # This handler processes button clicks for monitoring
+    dispatcher.add_handler(CallbackQueryHandler(button_callback, pattern='^(monitor|unmonitor)_'))
 
     # Schedule the monitoring job
     job_queue = updater.job_queue
