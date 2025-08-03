@@ -16,7 +16,10 @@ import os
 import logging
 
 # States for conversation
-CHOOSING_SIGNAL, TYPING_CUSTOM_SIGNAL = range(2)
+(
+    CHOOSING_SIGNAL, TYPING_CUSTOM_SIGNAL,
+    ASKING_LOT_SIZE,
+) = range(3)
 
 
 # --- Configuration ---
@@ -46,6 +49,8 @@ monitored_pairs = {}
 # Tracks the timestamp of the last signal candle for each symbol to avoid duplicates
 # { 'SYMBOL': timestamp }
 last_signal_timestamps = {}
+# {chat_id: {'auto_trade': False}}
+user_settings = {}
 
 # --- Function Definitions ---
 
@@ -306,13 +311,72 @@ def get_signal_for_symbol(symbol: str) -> str:
 
     signal = check_and_get_signal(symbol)
     if signal:
-        return format_signal_message(signal)
+        return format_signal_message(signal), signal # Return both message and raw signal
     else:
         # Check for data availability to give a more informative message
         rates_df = get_price_data(symbol, TIMEFRAME, count=2)
         if rates_df is None or rates_df.empty:
-            return f"Could not retrieve data for {symbol}. It might be an invalid symbol."
-        return f"No clear signal for {symbol} at the moment."
+            return f"Could not retrieve data for {symbol}. It might be an invalid symbol.", None
+        return f"No clear signal for {symbol} at the moment.", None
+
+
+def place_market_order(signal_type: str, symbol: str, lot_size: float, sl_price: float, tp_price: float) -> str:
+    """
+    Places a market order on MetaTrader 5.
+    Returns a string with the result of the operation.
+    """
+    logger.info(f"Attempting to place {signal_type} order for {symbol} with lot size {lot_size}.")
+
+    symbol_info = mt5.symbol_info(symbol)
+    if not symbol_info:
+        logger.error(f"Could not get info for {symbol}, cannot place order.")
+        return f"❌ **Order Failed**: Could not retrieve symbol information for {symbol}."
+
+    if signal_type == 'BUY':
+        order_type = mt5.ORDER_TYPE_BUY
+        price = mt5.symbol_info_tick(symbol).ask
+    elif signal_type == 'SELL':
+        order_type = mt5.ORDER_TYPE_SELL
+        price = mt5.symbol_info_tick(symbol).bid
+    else:
+        logger.warning(f"Invalid order type specified: {signal_type}")
+        return f"❌ **Order Failed**: Invalid order type '{signal_type}'."
+
+    # Verify that the prices are properly rounded to the symbol's digits
+    sl_price = round(sl_price, symbol_info.digits)
+    tp_price = round(tp_price, symbol_info.digits)
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": lot_size,
+        "type": order_type,
+        "price": price,
+        "sl": sl_price,
+        "tp": tp_price,
+        "deviation": 20, # Allowed slippage in points
+        "magic": 234000, # A magic number to identify orders from this bot
+        "comment": "Telegram Signal Bot",
+        "type_time": mt5.ORDER_TIME_GTC, # Good till cancelled
+        "type_filling": mt5.ORDER_FILLING_IOC, # Immediate or Cancel
+    }
+
+    try:
+        result = mt5.order_send(request)
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.error(f"Order failed for {symbol}. Code: {result.retcode}, Comment: {result.comment}")
+            return f"❌ **Order Failed** for {symbol}.\nReason: {result.comment} (Code: {result.retcode})"
+        else:
+            logger.info(f"Order successful for {symbol}. Ticket: {result.order}, Price: {result.price}, Volume: {result.volume}")
+            return (f"✅ **Order Successful!**\n\n"
+                    f"🔹 **Symbol:** {symbol}\n"
+                    f"🔹 **Type:** {signal_type}\n"
+                    f"🔹 **Lot Size:** {result.volume}\n"
+                    f"🔹 **Ticket:** {result.order}")
+    except Exception as e:
+        logger.error(f"An exception occurred while placing order for {symbol}: {e}")
+        return f"❌ **Order Failed**: An unexpected error occurred: {e}"
+
 
 # --- Telegram Command Handlers ---
 
@@ -321,19 +385,125 @@ def start(update: Update, context: CallbackContext) -> None:
     user = update.effective_user
     welcome_message = (
         f"👋 Hello {user.first_name}!\n\n"
-        "I am your Forex Signal Bot. Here's how you can use me:\n\n"
-        "🔹 /signal - Get an immediate signal for a specific currency pair.\n"
-        "🔹 /monitor - Choose pairs to monitor continuously for signals.\n"
-        "🔹 /unmonitor - Stop monitoring specific pairs.\n"
-        "🔹 /monitoring - See the list of pairs you are currently monitoring.\n"
+        "I am your Forex Signal & Trading Bot. Here's a list of commands:\n\n"
+        "**Signal Commands**\n"
+        "🔹 /signal - Get an immediate signal for a currency pair.\n"
+        "🔹 /monitor - Select pairs to monitor for signals.\n"
+        "🔹 /unmonitor - Stop monitoring pairs.\n"
+        "🔹 /monitoring - List your monitored pairs.\n\n"
+        "**Trading Commands**\n"
+        "🤖 /autotrade_on - Enable automatic trading (lot size 0.01).\n"
+        "🤖 /autotrade_off - Disable automatic trading.\n"
+        "🤖 /autotrade_status - Check if auto-trading is on or off.\n\n"
         "🔹 /help - Show this help message again.\n\n"
-        "Let's get started!"
+        "When a signal is received and auto-trade is off, you will see buttons to manually execute the trade."
     )
     update.message.reply_text(welcome_message)
 
 def help_command(update: Update, context: CallbackContext) -> None:
     """Sends help message."""
     start(update, context)
+
+def autotrade_on(update: Update, context: CallbackContext) -> None:
+    """Enables auto-trading for the user."""
+    chat_id = update.message.chat_id
+    if chat_id not in user_settings:
+        user_settings[chat_id] = {}
+    user_settings[chat_id]['auto_trade'] = True
+    logger.info(f"Auto-trading enabled for chat_id: {chat_id}")
+    update.message.reply_text("🤖 Auto-trading has been **ENABLED**. I will now execute trades automatically with a lot size of 0.01.")
+
+def autotrade_off(update: Update, context: CallbackContext) -> None:
+    """Disables auto-trading for the user."""
+    chat_id = update.message.chat_id
+    if chat_id in user_settings:
+        user_settings[chat_id]['auto_trade'] = False
+    # Also handles cases where the user was never in the settings dict
+    else:
+        user_settings[chat_id] = {'auto_trade': False}
+    logger.info(f"Auto-trading disabled for chat_id: {chat_id}")
+    update.message.reply_text("🤖 Auto-trading has been **DISABLED**. I will ask for confirmation before placing trades.")
+
+def autotrade_status(update: Update, context: CallbackContext) -> None:
+    """Checks the current auto-trading status for the user."""
+    chat_id = update.message.chat_id
+    status = user_settings.get(chat_id, {}).get('auto_trade', False)
+    if status:
+        update.message.reply_text("🤖 Auto-trading is currently **ENABLED**.")
+    else:
+        update.message.reply_text("🤖 Auto-trading is currently **DISABLED**.")
+
+
+def trade_callback(update: Update, context: CallbackContext) -> int:
+    """Handles the 'BUY' or 'SELL' button press to start the trade conversation."""
+    query = update.callback_query
+    query.answer()
+
+    # e.g., 'trade_buy_EURUSD'
+    _, trade_type, symbol = query.data.split('_')
+
+    # It's crucial to fetch the latest signal data right before the trade
+    # to ensure prices (SL/TP) are as relevant as possible.
+    signal = check_and_get_signal(symbol)
+
+    if not signal or signal['type'].lower() != trade_type:
+        query.edit_message_text(text="⚠️ The signal has expired or conditions have changed. Please request a new signal analysis.")
+        return ConversationHandler.END
+
+    # Store the validated signal data in user_data for the next step
+    context.user_data['trade_signal'] = signal
+    logger.info(f"User {query.from_user.id} initiated {trade_type} for {symbol}. Asking for lot size.")
+
+    # Edit the original message to ask for lot size
+    query.edit_message_text(
+        text=f"You've initiated a **{trade_type.upper()}** for **{symbol}**.\n\n"
+             f"Please enter the lot size you wish to use (e.g., `0.01`, `0.1`).\n\n"
+             f"Type /cancel to abort."
+    )
+
+    return ASKING_LOT_SIZE
+
+
+def lot_size_input(update: Update, context: CallbackContext) -> int:
+    """Receives lot size, places the order, and ends the conversation."""
+    lot_size_str = update.message.text
+    signal = context.user_data.get('trade_signal')
+
+    if not signal:
+        update.message.reply_text("❌ An error occurred: I've lost the context of the trade. Please start over by requesting a new signal.")
+        return ConversationHandler.END
+
+    try:
+        # Validate the lot size
+        lot_size = float(lot_size_str)
+        if lot_size <= 0:
+            raise ValueError("Lot size must be a positive number.")
+    except ValueError:
+        update.message.reply_text(
+            "⚠️ Invalid lot size. Please enter a positive number (e.g., `0.01`).\n\n"
+            "Or type /cancel to abort."
+        )
+        return ASKING_LOT_SIZE # Ask again without ending the conversation
+
+    logger.info(f"User {update.effective_user.id} entered lot size {lot_size}. Placing order.")
+    update.message.reply_text(f"⏳ Understood. Placing a **{signal['type']}** order for **{signal['symbol']}** with lot size **{lot_size}**...")
+
+    # Execute the trade
+    trade_result = place_market_order(
+        signal_type=signal['type'],
+        symbol=signal['symbol'],
+        lot_size=lot_size,
+        sl_price=signal['sl'],
+        tp_price=signal['tp']
+    )
+
+    update.message.reply_text(trade_result, parse_mode='Markdown')
+
+    # Clean up the user_data to free memory
+    if 'trade_signal' in context.user_data:
+        del context.user_data['trade_signal']
+
+    return ConversationHandler.END
 
 
 def signal_command(update: Update, context: CallbackContext) -> int:
@@ -359,7 +529,7 @@ def signal_command(update: Update, context: CallbackContext) -> int:
 
 
 def signal_button_callback(update: Update, context: CallbackContext) -> int:
-    """Handles button presses for the signal command."""
+    """Handles button presses for the signal command, gets signal, and shows trade buttons."""
     query = update.callback_query
     query.answer()
 
@@ -372,20 +542,46 @@ def signal_button_callback(update: Update, context: CallbackContext) -> int:
 
     if symbol:
         query.edit_message_text(text=f"⏳ Analyzing {symbol}, please wait...")
-        signal_message = get_signal_for_symbol(symbol)
-        query.edit_message_text(text=signal_message)
+        # get_signal_for_symbol now returns (message, signal_object)
+        signal_message, signal_data = get_signal_for_symbol(symbol)
+
+        if signal_data:
+            # If there's a signal, show the trade buttons
+            keyboard = [
+                [
+                    InlineKeyboardButton(f"📈 BUY {symbol}", callback_data=f"trade_buy_{symbol}"),
+                    InlineKeyboardButton(f"📉 SELL {symbol}", callback_data=f"trade_sell_{symbol}")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            query.edit_message_text(text=signal_message, reply_markup=reply_markup)
+        else:
+            # If no signal, just show the message
+            query.edit_message_text(text=signal_message)
 
     return ConversationHandler.END
 
 
 def custom_signal_input(update: Update, context: CallbackContext) -> int:
-    """Handles the custom symbol input from the user."""
+    """Handles custom symbol input, gets signal, and shows trade buttons."""
     symbol = update.message.text.upper()
-    # Basic validation for symbol format can be added here if needed
 
     update.message.reply_text(f"⏳ Analyzing {symbol}, please wait...")
-    signal_message = get_signal_for_symbol(symbol)
-    update.message.reply_text(text=signal_message)
+    signal_message, signal_data = get_signal_for_symbol(symbol)
+
+    if signal_data:
+        # If there's a signal, show the trade buttons
+        keyboard = [
+            [
+                InlineKeyboardButton(f"📈 BUY {symbol}", callback_data=f"trade_buy_{symbol}"),
+                InlineKeyboardButton(f"📉 SELL {symbol}", callback_data=f"trade_sell_{symbol}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        update.message.reply_text(text=signal_message, reply_markup=reply_markup)
+    else:
+        # If no signal, just show the message
+        update.message.reply_text(text=signal_message)
 
     return ConversationHandler.END
 
@@ -497,7 +693,8 @@ def button_callback(update: Update, context: CallbackContext) -> None:
 
 def check_all_monitored_pairs_job(context: CallbackContext) -> None:
     """
-    This job iterates through all monitored pairs and sends a signal if one is found.
+    This job iterates through all monitored pairs, checks for signals, and then
+    either executes a trade automatically or sends a notification with options.
     """
     if not mt5.terminal_state().connected:
         logger.warning("Job running, but MT5 is not connected. Attempting to reconnect.")
@@ -513,10 +710,35 @@ def check_all_monitored_pairs_job(context: CallbackContext) -> None:
             try:
                 signal = check_and_get_signal(symbol)
                 if signal:
-                    message = format_signal_message(signal)
-                    # Send the message to the user
-                    context.bot.send_message(chat_id=chat_id, text=message)
-                    logger.info(f"Sent signal for {symbol} to chat_id {chat_id}")
+                    # Check if the user has auto-trading enabled
+                    is_auto_trade = user_settings.get(chat_id, {}).get('auto_trade', False)
+
+                    if is_auto_trade:
+                        logger.info(f"Auto-trading is ON for chat_id {chat_id}. Placing trade for {symbol}.")
+                        trade_result = place_market_order(
+                            signal_type=signal['type'],
+                            symbol=signal['symbol'],
+                            lot_size=0.01,
+                            sl_price=signal['sl'],
+                            tp_price=signal['tp']
+                        )
+                        # Notify the user about the auto-trade
+                        auto_trade_message = f"🤖 **Auto-Trade Executed** for {symbol}.\n\n{trade_result}"
+                        context.bot.send_message(chat_id=chat_id, text=auto_trade_message)
+                    else:
+                        # Manual trade: send signal with action buttons
+                        message = format_signal_message(signal)
+                        keyboard = [
+                            [
+                                InlineKeyboardButton(f"📈 BUY {symbol}", callback_data=f"trade_buy_{symbol}"),
+                                InlineKeyboardButton(f"📉 SELL {symbol}", callback_data=f"trade_sell_{symbol}")
+                            ]
+                        ]
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+                        context.bot.send_message(chat_id=chat_id, text=message, reply_markup=reply_markup)
+
+                    logger.info(f"Sent signal for {symbol} to chat_id {chat_id} (Auto-Trade: {is_auto_trade})")
+
             except Exception as e:
                 logger.error(f"Error checking signal for {symbol} for chat_id {chat_id}: {e}")
 
@@ -551,6 +773,9 @@ def main() -> None:
     dispatcher.add_handler(CommandHandler("monitor", monitor_command))
     dispatcher.add_handler(CommandHandler("unmonitor", unmonitor_command))
     dispatcher.add_handler(CommandHandler("monitoring", monitoring_command))
+    dispatcher.add_handler(CommandHandler("autotrade_on", autotrade_on))
+    dispatcher.add_handler(CommandHandler("autotrade_off", autotrade_off))
+    dispatcher.add_handler(CommandHandler("autotrade_status", autotrade_status))
 
     # Set up the conversation handler for the /signal command
     conv_handler = ConversationHandler(
@@ -566,6 +791,17 @@ def main() -> None:
 
     # This handler processes button clicks for monitoring
     dispatcher.add_handler(CallbackQueryHandler(button_callback, pattern='^(monitor|unmonitor)_'))
+
+    # Set up the conversation handler for placing trades
+    trade_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(trade_callback, pattern='^trade_')],
+        states={
+            ASKING_LOT_SIZE: [MessageHandler(Filters.text & ~Filters.command, lot_size_input)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_conversation)],
+        per_message=False # Make sure conversation is on a per-user basis
+    )
+    dispatcher.add_handler(trade_conv_handler)
 
     # Schedule the monitoring job
     job_queue = updater.job_queue
