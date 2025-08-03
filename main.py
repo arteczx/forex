@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # MetaTrader 5 Credentials
-MT5_LOGIN = 8930488
+MT5_LOGIN = 48930488
 MT5_PASSWORD = "LiusPro123_"
 MT5_SERVER = "HFMarketsGlobal-Demo"
 
