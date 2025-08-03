@@ -381,30 +381,57 @@ def place_market_order(signal_type: str, symbol: str, lot_size: float, sl_price:
 # --- Telegram Command Handlers ---
 
 async def start(update: Update, context) -> None:
-    """Sends a welcome message when the /start command is issued."""
+    """Sends a welcome message with a main menu."""
     user = update.effective_user
-    welcome_message = (
-        f"👋 Hello {user.first_name}!\n\n"
-        "I am your Forex Signal & Trading Bot. Here's a list of commands:\n\n"
+    welcome_message = f"👋 Hello {user.first_name}!\n\nI am your Forex Signal & Trading Bot. Please choose an option below to begin."
+
+    keyboard = [
+        [InlineKeyboardButton("📊 Get Signal", callback_data='menu_signal')],
+        [InlineKeyboardButton("⚙️ Setup Monitoring", callback_data='menu_monitor')],
+        [InlineKeyboardButton("📈 Account Status", callback_data='menu_status')],
+        [InlineKeyboardButton("❓ Help", callback_data='menu_help')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # If the command was initiated by a button press (e.g., from help menu), edit the message.
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text=welcome_message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            text=welcome_message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+async def help_command(update: Update, context) -> None:
+    """Sends a detailed help message with all commands."""
+    help_message = (
+        "Here is a list of available commands and features:\n\n"
         "**Signal Commands**\n"
         "🔹 /signal - Get an immediate signal for a currency pair.\n"
-        "🔹 /monitor - Select pairs to monitor for signals.\n"
-        "🔹 /unmonitor - Stop monitoring pairs.\n"
-        "🔹 /monitoring - List your monitored pairs.\n\n"
+        "🔹 /monitor - Select pairs to get continuous signal alerts for.\n"
+        "🔹 /unmonitor - Stop monitoring specific pairs.\n"
+        "🔹 /monitoring - See the list of pairs you are monitoring.\n\n"
         "**Trading & Account Commands**\n"
         "📈 /status - Check your account balance, equity, and PnL.\n"
         "📉 /pnl - Check the PnL for a specific open order.\n"
-        "🤖 /autotrade_on - Enable automatic trading (lot size 0.01).\n"
-        "🤖 /autotrade_off - Disable automatic trading.\n"
+        "🤖 /autotrade_on - Enable automatic trade execution (0.01 lot).\n"
+        "🤖 /autotrade_off - Disable automatic trade execution.\n"
         "🤖 /autotrade_status - Check if auto-trading is on or off.\n\n"
-        "🔹 /help - Show this help message again.\n\n"
-        "When a signal is received and auto-trade is off, you will see buttons to manually execute the trade."
+        "You can always return to the main menu by sending /start."
     )
-    await update.message.reply_text(welcome_message)
+    keyboard = [[InlineKeyboardButton("⬅️ Back to Main Menu", callback_data='menu_start')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-async def help_command(update: Update, context) -> None:
-    """Sends help message."""
-    await start(update, context)
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text=help_message, reply_markup=reply_markup, parse_mode='Markdown')
+    else:
+        await update.message.reply_text(text=help_message, reply_markup=reply_markup, parse_mode='Markdown')
+
 
 async def autotrade_on(update: Update, context) -> None:
     """Enables auto-trading for the user."""
@@ -437,27 +464,28 @@ async def autotrade_status(update: Update, context) -> None:
 
 
 async def account_status(update: Update, context) -> None:
-    """Displays the current MetaTrader account status."""
+    """Displays the current MetaTrader account status. Works with commands and callbacks."""
+    message = update.effective_message
     if not mt5.terminal_info().connected:
         if not initialize_mt5():
-            await update.message.reply_text("❌ Could not connect to the trading server. Please try again later.")
+            await message.reply_text("❌ Could not connect to the trading server. Please try again later.")
             return
 
     account_info = mt5.account_info()
     if not account_info:
-        await update.message.reply_text("❌ Failed to retrieve account information.")
+        await message.reply_text("❌ Failed to retrieve account information.")
         return
 
     positions = mt5.positions_get()
     if positions is None:
-        await update.message.reply_text("❌ Failed to retrieve open positions. The connection might have been lost.")
+        await message.reply_text("❌ Failed to retrieve open positions. The connection might have been lost.")
         return
 
     num_positions = len(positions)
     total_pnl = sum(pos.profit for pos in positions)
 
     pnl_icon = "🟢" if total_pnl >= 0 else "🔴"
-    message = (
+    status_message = (
         f"📊 **Account Status**\n\n"
         f"🔹 **Balance:** {account_info.balance:.2f} {account_info.currency}\n"
         f"🔹 **Equity:** {account_info.equity:.2f} {account_info.currency}\n"
@@ -465,7 +493,7 @@ async def account_status(update: Update, context) -> None:
         f"{pnl_icon} **Total PnL:** {total_pnl:.2f} {account_info.currency}"
     )
 
-    await update.message.reply_text(message, parse_mode='Markdown')
+    await message.reply_text(status_message, parse_mode='Markdown')
 
 
 async def pnl_command(update: Update, context) -> None:
@@ -615,6 +643,7 @@ async def lot_size_input(update: Update, context) -> int:
 
 async def signal_command(update: Update, context) -> int:
     """Displays an inline keyboard for the user to select a symbol for a one-time signal. Starts the conversation."""
+    message = update.effective_message
     keyboard = [
         [
             InlineKeyboardButton("EURUSD", callback_data='signal_EURUSD'),
@@ -631,7 +660,13 @@ async def signal_command(update: Update, context) -> int:
         [InlineKeyboardButton("Custom Pair", callback_data='signal_custom')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('Please choose a symbol to get a signal for, or choose "Custom":', reply_markup=reply_markup)
+
+    text = 'Please choose a symbol to get a signal for, or choose "Custom":'
+    if update.callback_query:
+        await message.edit_text(text, reply_markup=reply_markup)
+    else:
+        await message.reply_text(text, reply_markup=reply_markup)
+
     return CHOOSING_SIGNAL
 
 
@@ -649,17 +684,17 @@ async def signal_button_callback(update: Update, context) -> int:
 
     if symbol:
         await query.edit_message_text(text=f"⏳ Analyzing {symbol}, please wait...")
-        # get_signal_for_symbol now returns (message, signal_object)
         signal_message, signal_data = get_signal_for_symbol(symbol)
 
         if signal_data:
-            # If there's a signal, show the trade buttons
-            keyboard = [
-                [
-                    InlineKeyboardButton(f"📈 BUY {symbol}", callback_data=f"trade_buy_{symbol}"),
-                    InlineKeyboardButton(f"📉 SELL {symbol}", callback_data=f"trade_sell_{symbol}")
-                ]
-            ]
+            # If there's a signal, show only the correct trade button
+            signal_type = signal_data['type']
+            if signal_type == 'BUY':
+                button = InlineKeyboardButton(f"📈 BUY {symbol}", callback_data=f"trade_buy_{symbol}")
+            else:  # SELL
+                button = InlineKeyboardButton(f"📉 SELL {symbol}", callback_data=f"trade_sell_{symbol}")
+
+            keyboard = [[button]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(text=signal_message, reply_markup=reply_markup)
         else:
@@ -677,13 +712,16 @@ async def custom_signal_input(update: Update, context) -> int:
     signal_message, signal_data = get_signal_for_symbol(symbol)
 
     if signal_data:
-        # If there's a signal, show the trade buttons
-        keyboard = [
-            [
-                InlineKeyboardButton(f"📈 BUY {symbol}", callback_data=f"trade_buy_{symbol}"),
-                InlineKeyboardButton(f"📉 SELL {symbol}", callback_data=f"trade_sell_{symbol}")
-            ]
-        ]
+        # If there's a signal, show only the correct trade button
+        signal_type = signal_data['type']
+        # Get symbol from signal_data to ensure consistency
+        symbol = signal_data['symbol']
+        if signal_type == 'BUY':
+            button = InlineKeyboardButton(f"📈 BUY {symbol}", callback_data=f"trade_buy_{symbol}")
+        else:  # SELL
+            button = InlineKeyboardButton(f"📉 SELL {symbol}", callback_data=f"trade_sell_{symbol}")
+
+        keyboard = [[button]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(text=signal_message, reply_markup=reply_markup)
     else:
@@ -704,7 +742,9 @@ async def monitor_command(update: Update, context) -> None:
     Adds a symbol to the monitoring list via text command,
     or displays an inline keyboard for the user to select symbols to monitor.
     """
-    chat_id = update.message.chat_id
+    message = update.effective_message
+    chat_id = message.chat_id
+
     # Check if the command was used with an argument (e.g., /monitor BTCUSD)
     if context.args:
         symbol = context.args[0].upper()
@@ -716,15 +756,15 @@ async def monitor_command(update: Update, context) -> None:
         if symbol not in monitored_pairs[chat_id]:
             monitored_pairs[chat_id].append(symbol)
             logger.info(f"Added {symbol} to monitor list for chat_id {chat_id}")
-            await update.message.reply_text(
+            await message.reply_text(
                 f"✅ Added **{symbol}** to your monitoring list.\n"
                 f"I will check for signals every 5 minutes."
             , parse_mode='Markdown')
         else:
-            await update.message.reply_text(f"ℹ️ You are already monitoring {symbol}.")
+            await message.reply_text(f"ℹ️ You are already monitoring {symbol}.")
         return
 
-    # If no argument, show the buttons (existing functionality)
+    # If no argument, show the buttons
     keyboard = [
         [
             InlineKeyboardButton("EURUSD", callback_data='monitor_EURUSD'),
@@ -741,23 +781,32 @@ async def monitor_command(update: Update, context) -> None:
         [InlineKeyboardButton("Done", callback_data='monitor_done')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('Choose symbols to add to your monitoring list, or use `/monitor SYMBOL`:', reply_markup=reply_markup)
+
+    text = 'Choose symbols to add to your monitoring list, or use `/monitor SYMBOL`:'
+    if update.callback_query:
+        await message.edit_text(text, reply_markup=reply_markup)
+    else:
+        await message.reply_text(text, reply_markup=reply_markup)
 
 
 async def unmonitor_command(update: Update, context) -> None:
     """Displays an inline keyboard of currently monitored symbols for the user to remove."""
-    chat_id = update.message.chat_id
+    message = update.effective_message
+    chat_id = message.chat_id
     user_monitored_pairs = monitored_pairs.get(chat_id, [])
 
     if not user_monitored_pairs:
-        await update.message.reply_text("You are not monitoring any pairs yet. Use /monitor to add some.")
+        await message.reply_text("You are not monitoring any pairs yet. Use /monitor to add some.")
         return
 
-    keyboard = [[InlineKeyboardButton(symbol, callback_data=f'unmonitor_{symbol}')] for symbol in user_monitored_pairs]
-    keyboard.append([InlineKeyboardButton("Done", callback_data='unmonitor_done')])
+    keyboard = [[InlineKeyboardButton(f"❌ {symbol}", callback_data=f'unmonitor_{symbol}')] for symbol in user_monitored_pairs]
+    keyboard.append([
+        InlineKeyboardButton("🗑️ Clear All", callback_data='unmonitor_clear_all'),
+        InlineKeyboardButton("✅ Done", callback_data='unmonitor_done')
+    ])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('Choose symbols to remove from your monitoring list:', reply_markup=reply_markup)
+    await message.reply_text('Choose symbols to remove from your monitoring list:', reply_markup=reply_markup)
 
 
 async def monitoring_command(update: Update, context) -> None:
@@ -774,17 +823,23 @@ async def monitoring_command(update: Update, context) -> None:
 
 
 async def button_callback(update: Update, context) -> None:
-    """Parses the CallbackQuery and runs the appropriate action."""
+    """Parses the CallbackQuery and runs the appropriate action for monitoring."""
     query = update.callback_query
-    await query.answer()  # Acknowledge the button press
+    await query.answer()
 
     action, *data = query.data.split('_', 1)
     symbol = data[0] if data else None
     chat_id = query.message.chat_id
 
+    # --- Monitor Action ---
     if action == 'monitor':
         if symbol == 'done':
-            await query.edit_message_text(text="Your monitoring list has been updated.")
+            user_monitored_pairs = monitored_pairs.get(chat_id, [])
+            if user_monitored_pairs:
+                final_message = "✅ Your monitoring list is updated. I will now watch:\n" + "\n".join(f"• {s}" for s in user_monitored_pairs)
+            else:
+                final_message = "Your monitoring list is empty. Add pairs to start receiving signals."
+            await query.edit_message_text(text=final_message)
             return
 
         # Initialize list if not present
@@ -792,31 +847,63 @@ async def button_callback(update: Update, context) -> None:
             monitored_pairs[chat_id] = []
 
         # Add symbol if not already there
-        if symbol not in monitored_pairs[chat_id]:
+        if symbol and symbol not in monitored_pairs[chat_id]:
             monitored_pairs[chat_id].append(symbol)
-            await query.answer(text=f"✅ Added {symbol} to your monitoring list.")
-        else:
-            await query.answer(text=f"ℹ️ You are already monitoring {symbol}.")
+            await query.answer(text=f"✅ Added {symbol}")
+        elif symbol:
+            await query.answer(text=f"ℹ️ Already monitoring {symbol}")
 
+        # --- Refresh the message with updated list ---
+        user_monitored_pairs = monitored_pairs.get(chat_id, [])
+        monitored_list_text = "\n\n**Currently Monitoring:**\n" + "\n".join(f"• {s}" for s in user_monitored_pairs) if user_monitored_pairs else ""
+
+        # Re-create the keyboard to show the same options
+        keyboard = [
+            [InlineKeyboardButton("EURUSD", callback_data='monitor_EURUSD'), InlineKeyboardButton("GBPUSD", callback_data='monitor_GBPUSD')],
+            [InlineKeyboardButton("USDJPY", callback_data='monitor_USDJPY'), InlineKeyboardButton("AUDUSD", callback_data='monitor_AUDUSD')],
+            [InlineKeyboardButton("USDCAD", callback_data='monitor_USDCAD'), InlineKeyboardButton("XAUUSD", callback_data='monitor_XAUUSD')],
+            [InlineKeyboardButton("✅ Done", callback_data='monitor_done')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            text=f'Choose symbols to add to your monitoring list.{monitored_list_text}',
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+    # --- Unmonitor Action ---
     elif action == 'unmonitor':
         if symbol == 'done':
             await query.edit_message_text(text="Your monitoring list has been updated.")
             return
 
+        if symbol == 'clear_all':
+            if chat_id in monitored_pairs:
+                monitored_pairs[chat_id] = []
+                logger.info(f"Cleared all monitored pairs for chat_id {chat_id}")
+            await query.edit_message_text("✅ All symbols have been removed from your monitoring list.")
+            return
+
+        # --- Remove a single symbol ---
         if chat_id in monitored_pairs and symbol in monitored_pairs[chat_id]:
             monitored_pairs[chat_id].remove(symbol)
-            await query.answer(text=f"❌ Removed {symbol} from your monitoring list.")
-            # Refresh the keyboard
+            await query.answer(text=f"❌ Removed {symbol}")
+
+            # Refresh the keyboard to show the updated list
             user_monitored_pairs = monitored_pairs.get(chat_id, [])
             if not user_monitored_pairs:
                 await query.edit_message_text("You are no longer monitoring any pairs.")
             else:
-                keyboard = [[InlineKeyboardButton(s, callback_data=f'unmonitor_{s}')] for s in user_monitored_pairs]
-                keyboard.append([InlineKeyboardButton("Done", callback_data='unmonitor_done')])
+                keyboard = [[InlineKeyboardButton(f"❌ {s}", callback_data=f'unmonitor_{s}')] for s in user_monitored_pairs]
+                keyboard.append([
+                    InlineKeyboardButton("🗑️ Clear All", callback_data='unmonitor_clear_all'),
+                    InlineKeyboardButton("✅ Done", callback_data='unmonitor_done')
+                ])
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await query.edit_message_text('Choose symbols to remove:', reply_markup=reply_markup)
         else:
-            await query.answer(text=f"ℹ️ You are not monitoring {symbol}.")
+            await query.answer(text=f"ℹ️ You were not monitoring {symbol}.")
 
     else:
         await query.edit_message_text(text=f"Unknown action: {action}")
@@ -857,14 +944,15 @@ async def check_all_monitored_pairs_job(context) -> None:
                         auto_trade_message = f"🤖 **Auto-Trade Executed** for {symbol}.\n\n{trade_result}"
                         await context.bot.send_message(chat_id=chat_id, text=auto_trade_message)
                     else:
-                        # Manual trade: send signal with action buttons
+                        # Manual trade: send signal with the correct action button
                         message = format_signal_message(signal)
-                        keyboard = [
-                            [
-                                InlineKeyboardButton(f"📈 BUY {symbol}", callback_data=f"trade_buy_{symbol}"),
-                                InlineKeyboardButton(f"📉 SELL {symbol}", callback_data=f"trade_sell_{symbol}")
-                            ]
-                        ]
+                        signal_type = signal['type']
+                        if signal_type == 'BUY':
+                            button = InlineKeyboardButton(f"📈 BUY {symbol}", callback_data=f"trade_buy_{symbol}")
+                        else: # SELL
+                            button = InlineKeyboardButton(f"📉 SELL {symbol}", callback_data=f"trade_sell_{symbol}")
+
+                        keyboard = [[button]]
                         reply_markup = InlineKeyboardMarkup(keyboard)
                         await context.bot.send_message(chat_id=chat_id, text=message, reply_markup=reply_markup)
 
@@ -875,6 +963,21 @@ async def check_all_monitored_pairs_job(context) -> None:
 
 
 # --- Main Bot Logic ---
+async def main_menu_handler(update: Update, context) -> None:
+    """Handles callbacks from the main menu."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == 'menu_help':
+        await help_command(update, context)
+    elif query.data == 'menu_status':
+        await account_status(update, context)
+    elif query.data == 'menu_monitor':
+        await monitor_command(update, context)
+    elif query.data == 'menu_start':
+        await start(update, context)
+    # The 'menu_signal' is handled by the ConversationHandler entry point now
+
 
 def main() -> None:
     """Start the telegram bot."""
@@ -906,7 +1009,10 @@ def main() -> None:
 
     # Set up the conversation handler for the /signal command
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('signal', signal_command)],
+        entry_points=[
+            CommandHandler('signal', signal_command),
+            CallbackQueryHandler(signal_command, pattern='^menu_signal$')
+        ],
         states={
             CHOOSING_SIGNAL: [CallbackQueryHandler(signal_button_callback, pattern='^signal_')],
             TYPING_CUSTOM_SIGNAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_signal_input)],
@@ -915,6 +1021,9 @@ def main() -> None:
         per_message=False
     )
     application.add_handler(conv_handler)
+
+    # This handler processes button clicks from the main menu
+    application.add_handler(CallbackQueryHandler(main_menu_handler, pattern='^menu_'))
 
     # This handler processes button clicks for monitoring
     application.add_handler(CallbackQueryHandler(button_callback, pattern='^(monitor|unmonitor)_'))
