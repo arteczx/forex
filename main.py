@@ -356,12 +356,8 @@ def check_and_get_signal(symbol):
     ha_df = calculate_heikin_ashi(rates_df.copy())
 
     # --- Mode 1: HA + MA Crossover Analysis ---
-    # Calculate indicators on the raw price data first
-    rates_df_with_indicators = calculate_indicators(rates_df.copy())
-    # Add the indicators to the Heikin Ashi dataframe for checking
-    ha_df_with_ma = ha_df.copy()
-    ha_df_with_ma['fast_ma'] = rates_df_with_indicators['fast_ma']
-    ha_df_with_ma['slow_ma'] = rates_df_with_indicators['slow_ma']
+    # Calculate indicators directly on the Heikin Ashi data, which contains HA close prices
+    ha_df_with_ma = calculate_indicators(ha_df.copy())
 
     buy_signal_ha_ma = check_buy_signal(symbol, ha_df_with_ma, rates_df, pip_size)
     if buy_signal_ha_ma:
