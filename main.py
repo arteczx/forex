@@ -391,7 +391,9 @@ def start(update: Update, context: CallbackContext) -> None:
         "🔹 /monitor - Select pairs to monitor for signals.\n"
         "🔹 /unmonitor - Stop monitoring pairs.\n"
         "🔹 /monitoring - List your monitored pairs.\n\n"
-        "**Trading Commands**\n"
+        "**Trading & Account Commands**\n"
+        "📈 /status - Check your account balance, equity, and PnL.\n"
+        "📉 /pnl - Check the PnL for a specific open order.\n"
         "🤖 /autotrade_on - Enable automatic trading (lot size 0.01).\n"
         "🤖 /autotrade_off - Disable automatic trading.\n"
         "🤖 /autotrade_status - Check if auto-trading is on or off.\n\n"
@@ -432,6 +434,111 @@ def autotrade_status(update: Update, context: CallbackContext) -> None:
         update.message.reply_text("🤖 Auto-trading is currently **ENABLED**.")
     else:
         update.message.reply_text("🤖 Auto-trading is currently **DISABLED**.")
+
+
+def account_status(update: Update, context: CallbackContext) -> None:
+    """Displays the current MetaTrader account status."""
+    if not mt5.terminal_state().connected:
+        if not initialize_mt5():
+            update.message.reply_text("❌ Could not connect to the trading server. Please try again later.")
+            return
+
+    account_info = mt5.account_info()
+    if not account_info:
+        update.message.reply_text("❌ Failed to retrieve account information.")
+        return
+
+    positions = mt5.positions_get()
+    if positions is None:
+        update.message.reply_text("❌ Failed to retrieve open positions. The connection might have been lost.")
+        return
+
+    num_positions = len(positions)
+    total_pnl = sum(pos.profit for pos in positions)
+
+    pnl_icon = "🟢" if total_pnl >= 0 else "🔴"
+    message = (
+        f"📊 **Account Status**\n\n"
+        f"🔹 **Balance:** {account_info.balance:.2f} {account_info.currency}\n"
+        f"🔹 **Equity:** {account_info.equity:.2f} {account_info.currency}\n"
+        f"🔹 **Open Positions:** {num_positions}\n"
+        f"{pnl_icon} **Total PnL:** {total_pnl:.2f} {account_info.currency}"
+    )
+
+    update.message.reply_text(message, parse_mode='Markdown')
+
+
+def pnl_command(update: Update, context: CallbackContext) -> None:
+    """Starts the conversation to check PnL for a specific order."""
+    if not mt5.terminal_state().connected:
+        if not initialize_mt5():
+            update.message.reply_text("❌ Could not connect to the trading server. Please try again later.")
+            return
+
+    positions = mt5.positions_get()
+    if positions is None:
+        update.message.reply_text("❌ Failed to retrieve open positions. The connection might have been lost.")
+        return
+
+    if not positions:
+        update.message.reply_text("ℹ️ You have no open orders to check.")
+        return
+
+    keyboard = []
+    for pos in positions:
+        trade_type = "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL"
+        button_text = f"{trade_type} {pos.symbol} {pos.volume} lot"
+        callback_data = f"pnl_{pos.ticket}"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text("Please select an order to check its PnL:", reply_markup=reply_markup)
+
+
+def pnl_callback(update: Update, context: CallbackContext) -> None:
+    """Handles the PnL button press and shows details for a specific order."""
+    query = update.callback_query
+    query.answer()
+
+    try:
+        _, ticket_str = query.data.split('_')
+        ticket = int(ticket_str)
+    except (ValueError, IndexError):
+        query.edit_message_text("❌ Invalid callback data.")
+        return
+
+    if not mt5.terminal_state().connected:
+        if not initialize_mt5():
+            query.edit_message_text("❌ Could not connect to the trading server.")
+            return
+
+    positions = mt5.positions_get(ticket=ticket)
+    if not positions:
+        query.edit_message_text(f"❌ Could not find order with ticket {ticket}. It might have been closed.")
+        return
+
+    pos = positions[0]
+    account_info = mt5.account_info()
+    currency = account_info.currency if account_info else ""
+
+    trade_type = "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL"
+    pnl_icon = "🟢" if pos.profit >= 0 else "🔴"
+
+    message = (
+        f"🔍 **PnL for Ticket {pos.ticket}**\n\n"
+        f"🔹 **Symbol:** {pos.symbol}\n"
+        f"🔹 **Type:** {trade_type}\n"
+        f"🔹 **Volume:** {pos.volume} lot\n"
+        f"------------------------------------\n"
+        f"🔹 **Open Price:** {pos.price_open:.5f}\n"
+        f"🔹 **Current Price:** {pos.price_current:.5f}\n"
+        f"🔹 **Stop Loss:** {pos.sl:.5f}\n"
+        f"🔹 **Take Profit:** {pos.tp:.5f}\n"
+        f"------------------------------------\n"
+        f"{pnl_icon} **Profit/Loss:** {pos.profit:.2f} {currency}"
+    )
+
+    query.edit_message_text(text=message, parse_mode='Markdown')
 
 
 def trade_callback(update: Update, context: CallbackContext) -> int:
@@ -776,6 +883,8 @@ def main() -> None:
     dispatcher.add_handler(CommandHandler("autotrade_on", autotrade_on))
     dispatcher.add_handler(CommandHandler("autotrade_off", autotrade_off))
     dispatcher.add_handler(CommandHandler("autotrade_status", autotrade_status))
+    dispatcher.add_handler(CommandHandler("status", account_status))
+    dispatcher.add_handler(CommandHandler("pnl", pnl_command))
 
     # Set up the conversation handler for the /signal command
     conv_handler = ConversationHandler(
@@ -791,6 +900,9 @@ def main() -> None:
 
     # This handler processes button clicks for monitoring
     dispatcher.add_handler(CallbackQueryHandler(button_callback, pattern='^(monitor|unmonitor)_'))
+
+    # This handler processes PnL button clicks
+    dispatcher.add_handler(CallbackQueryHandler(pnl_callback, pattern='^pnl_'))
 
     # Set up the conversation handler for placing trades
     trade_conv_handler = ConversationHandler(
