@@ -24,7 +24,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 
 # Trading Parameters
 TIMEFRAME = mt5.TIMEFRAME_M5
-HIGHER_TIMEFRAME = mt5.TIMEFRAME_M15
 FAST_MA_PERIOD = 12
 SLOW_MA_PERIOD = 50
 RISK_REWARD_RATIO = 2.0
@@ -89,23 +88,6 @@ def calculate_indicators(df):
     df['slow_ma'] = df['close'].rolling(window=SLOW_MA_PERIOD).mean()
     return df
 
-def check_trend_bias(symbol, timeframe):
-    """Checks the overall trend on a higher timeframe."""
-    htf_rates = get_price_data(symbol, timeframe, count=100)
-    if htf_rates is None or htf_rates.empty:
-        return "NEUTRAL"
-    htf_ha = calculate_heikin_ashi(htf_rates)
-    htf_ha = calculate_indicators(htf_ha)
-    if len(htf_ha) < SLOW_MA_PERIOD:
-        return "NEUTRAL"
-    last_candle = htf_ha.iloc[-2]
-    if last_candle['fast_ma'] > last_candle['slow_ma']:
-        return "BULLISH"
-    elif last_candle['fast_ma'] < last_candle['slow_ma']:
-        return "BEARISH"
-    else:
-        return "NEUTRAL"
-
 def is_resistance_broken(rates_df: pd.DataFrame, lookback: int = 50) -> bool:
     """
     Checks if the last closed candle has broken a recent resistance level.
@@ -125,52 +107,24 @@ def is_resistance_broken(rates_df: pd.DataFrame, lookback: int = 50) -> bool:
         return True
     return False
 
-def find_double_top(rates_df: pd.DataFrame, ha_df: pd.DataFrame, lookback: int = 100, tolerance_percent: float = 0.1):
+def is_support_broken(rates_df: pd.DataFrame, lookback: int = 50) -> bool:
     """
-    Identifies a double top pattern and a break of the neckline.
-    Returns a dictionary with pattern info if found, otherwise None.
+    Checks if the last closed candle has broken a recent support level.
+    Support is defined as the lowest low in the lookback period before the breakdown candle.
     """
-    end_idx = -2
-    start_idx = end_idx - lookback
-    if start_idx < 0:
-        start_idx = 0
-    search_df = rates_df.iloc[start_idx:end_idx]
+    # We look for support in the candles *before* the potential breakdown.
+    # Exclude the last 3 candles to give room for the setup to form.
+    search_df = rates_df.iloc[-(lookback + 3):-3]
+    if search_df.empty:
+        return False
 
-    if len(search_df) < 20:
-        return None
+    support_level = search_df['low'].min()
+    last_closed_price = rates_df.iloc[-2]['close']
 
-    peak2_idx = search_df['high'].idxmax()
-    peak2_high = search_df.loc[peak2_idx]['high']
-
-    search_before_peak2 = search_df.loc[:peak2_idx - pd.Timedelta(minutes=5*TIMEFRAME.value)] # 5 candles separation
-    if len(search_before_peak2) < 10:
-        return None
-    peak1_idx = search_before_peak2['high'].idxmax()
-    peak1_high = search_df.loc[peak1_idx]['high']
-
-    price_range = search_df['high'].max() - search_df['low'].min()
-    if price_range == 0: return None
-    tolerance = price_range * tolerance_percent
-    if abs(peak1_high - peak2_high) > tolerance:
-        return None
-
-    valley_df = search_df.loc[peak1_idx:peak2_idx]
-    if valley_df.empty:
-        return None
-    neckline_idx = valley_df['low'].idxmin()
-    neckline_low = search_df.loc[neckline_idx]['low']
-
-    avg_peak_height = (peak1_high + peak2_high) / 2
-    if (avg_peak_height - neckline_low) < (price_range * 0.1):
-        return None
-
-    last_closed_candle = rates_df.iloc[-2]
-    last_ha_candle = ha_df.iloc[-2]
-
-    if last_closed_candle['close'] < neckline_low and last_ha_candle['close'] < last_ha_candle['open']:
-        logger.info(f"Double Top detected and neckline broken at {neckline_low:.5f}")
-        return {"neckline": neckline_low, "peak_high": max(peak1_high, peak2_high)}
-    return None
+    if last_closed_price < support_level:
+        logger.info(f"Support broken: Last close {last_closed_price:.5f} < Support {support_level:.5f}")
+        return True
+    return False
 
 def get_exit_strategies(ha_df: pd.DataFrame, signal_type: str) -> dict:
     """
@@ -188,8 +142,8 @@ def get_exit_strategies(ha_df: pd.DataFrame, signal_type: str) -> dict:
 
     return exits
 
-def check_buy_signal(symbol, ha_df, rates_df, trend_bias, pip_size):
-    """Checks for a buy signal based on MA cross, HA, and resistance break."""
+def check_buy_signal(symbol, ha_df, rates_df, pip_size):
+    """Checks for a buy signal based on MA cross and HA."""
     prev_ha_candle = ha_df.iloc[-3]
     last_closed_ha_candle = ha_df.iloc[-2]
     last_closed_raw_candle = rates_df.iloc[-2]
@@ -198,9 +152,15 @@ def check_buy_signal(symbol, ha_df, rates_df, trend_bias, pip_size):
     is_bullish_cross = (prev_ha_candle['fast_ma'] <= prev_ha_candle['slow_ma'] and
                        last_closed_ha_candle['fast_ma'] > last_closed_ha_candle['slow_ma'])
     is_ha_green = last_closed_ha_candle['close'] > last_closed_ha_candle['open']
-    resistance_broken = is_resistance_broken(rates_df)
 
-    if is_bullish_cross and is_ha_green and trend_bias == "BULLISH" and resistance_broken:
+    # Breakout is now a point of interest, not a strict condition.
+    breakout_poi = is_resistance_broken(rates_df)
+    reason = "MA Crossover + Heikin Ashi"
+    if breakout_poi:
+        reason += " (Resistance Break POI)"
+
+
+    if is_bullish_cross and is_ha_green:
         if last_signal_timestamps.get(symbol) != last_closed_ha_candle['time']:
             last_signal_timestamps[symbol] = last_closed_ha_candle['time']
             signal_price = last_closed_raw_candle['close']
@@ -211,32 +171,42 @@ def check_buy_signal(symbol, ha_df, rates_df, trend_bias, pip_size):
             signal_info = {
                 'type': 'BUY', 'symbol': symbol, 'price': signal_price,
                 'sl': sl_price, 'tp': tp_price, 'time': last_closed_ha_candle['time'],
-                'reason': 'MA Cross & Resistance Break'
+                'reason': reason
             }
             signal_info['exits'] = get_exit_strategies(ha_df, 'BUY')
             return signal_info
     return None
 
-def check_sell_signal(symbol, ha_df, rates_df, trend_bias, pip_size):
-    """Checks for a sell signal based on a double top pattern."""
+def check_sell_signal(symbol, ha_df, rates_df, pip_size):
+    """Checks for a sell signal based on MA cross and HA."""
+    prev_ha_candle = ha_df.iloc[-3]
     last_closed_ha_candle = ha_df.iloc[-2]
     last_closed_raw_candle = rates_df.iloc[-2]
     sl_buffer = 10 * pip_size
 
-    pattern_info = find_double_top(rates_df, ha_df)
+    is_bearish_cross = (prev_ha_candle['fast_ma'] >= prev_ha_candle['slow_ma'] and
+                       last_closed_ha_candle['fast_ma'] < last_closed_ha_candle['slow_ma'])
+    is_ha_red = last_closed_ha_candle['close'] < last_closed_ha_candle['open']
 
-    if pattern_info and trend_bias == "BEARISH":
+    # Support breakout is a point of interest, not a strict condition
+    breakout_poi = is_support_broken(rates_df)
+    reason = "MA Crossover + Heikin Ashi"
+    if breakout_poi:
+        reason += " (Support Break POI)"
+
+    if is_bearish_cross and is_ha_red:
         if last_signal_timestamps.get(symbol) != last_closed_ha_candle['time']:
             last_signal_timestamps[symbol] = last_closed_ha_candle['time']
             signal_price = last_closed_raw_candle['close']
-            sl_price = pattern_info['peak_high'] + sl_buffer
+            # For a sell, SL is above the high, or MAs
+            sl_price = max(last_closed_raw_candle['high'], last_closed_ha_candle['fast_ma'], last_closed_ha_candle['slow_ma']) + sl_buffer
             risk = sl_price - signal_price
             tp_price = signal_price - (risk * RISK_REWARD_RATIO)
 
             signal_info = {
                 'type': 'SELL', 'symbol': symbol, 'price': signal_price,
                 'sl': sl_price, 'tp': tp_price, 'time': last_closed_ha_candle['time'],
-                'reason': 'Double Top & Neckline Break'
+                'reason': reason
             }
             signal_info['exits'] = get_exit_strategies(ha_df, 'SELL')
             return signal_info
@@ -247,7 +217,6 @@ def check_and_get_signal(symbol):
     Performs the core signal analysis for a symbol by checking for buy and sell signals.
     Returns a dictionary with signal details if a new signal is found, otherwise None.
     """
-    trend_bias = check_trend_bias(symbol, HIGHER_TIMEFRAME)
     # Increased count to have enough data for pattern analysis
     rates_df = get_price_data(symbol, TIMEFRAME, count=200)
     if rates_df is None or rates_df.empty or len(rates_df) < SLOW_MA_PERIOD + 50: # Increased buffer
@@ -264,12 +233,12 @@ def check_and_get_signal(symbol):
     pip_size = symbol_info.point
 
     # Check for buy signal
-    buy_signal = check_buy_signal(symbol, ha_df, rates_df, trend_bias, pip_size)
+    buy_signal = check_buy_signal(symbol, ha_df, rates_df, pip_size)
     if buy_signal:
         return buy_signal
 
     # Check for sell signal
-    sell_signal = check_sell_signal(symbol, ha_df, rates_df, trend_bias, pip_size)
+    sell_signal = check_sell_signal(symbol, ha_df, rates_df, pip_size)
     if sell_signal:
         return sell_signal
 
