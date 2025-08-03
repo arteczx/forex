@@ -9,7 +9,7 @@ from telegram.ext import (
     CallbackContext,
     ConversationHandler,
     MessageHandler,
-    Filters,
+    filters,
 )
 import time
 import os
@@ -891,7 +891,7 @@ def main() -> None:
         entry_points=[CommandHandler('signal', signal_command)],
         states={
             CHOOSING_SIGNAL: [CallbackQueryHandler(signal_button_callback, pattern='^signal_')],
-            TYPING_CUSTOM_SIGNAL: [MessageHandler(Filters.text & ~Filters.command, custom_signal_input)],
+            TYPING_CUSTOM_SIGNAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_signal_input)],
         },
         fallbacks=[CommandHandler('cancel', cancel_conversation)],
         per_message=False
@@ -908,7 +908,7 @@ def main() -> None:
     trade_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(trade_callback, pattern='^trade_')],
         states={
-            ASKING_LOT_SIZE: [MessageHandler(Filters.text & ~Filters.command, lot_size_input)],
+            ASKING_LOT_SIZE: [MessageHandler(filters.TEXT & ~filters.COMMAND, lot_size_input)],
         },
         fallbacks=[CommandHandler('cancel', cancel_conversation)],
         per_message=False # Make sure conversation is on a per-user basis
