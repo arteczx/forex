@@ -51,6 +51,9 @@ monitored_pairs = {}
 last_signal_timestamps = {}
 # {chat_id: {'auto_trade': False, 'mode': 'ha_ma'}}
 user_settings = {}
+# {ticket_id: chat_id} to notify users of auto-closures
+trade_to_chat_id = {}
+
 
 # --- Function Definitions ---
 
@@ -436,12 +439,12 @@ def get_signal_for_symbol(symbol: str, chat_id: int) -> tuple[str, dict | None]:
         return f"No clear signal for {symbol} using your selected mode at the moment.", None
 
 
-def place_market_order(signal_type: str, symbol: str, lot_size: float, sl_price: float, tp_price: float) -> str:
+def place_market_order(signal_type: str, symbol: str, lot_size: float, sl_price: float, tp_price: float, mode: str, chat_id: int) -> str:
     """
     Places a market order on MetaTrader 5.
     Returns a string with the result of the operation.
     """
-    logger.info(f"Attempting to place {signal_type} order for {symbol} with lot size {lot_size}.")
+    logger.info(f"Attempting to place {signal_type} order for {symbol} with lot size {lot_size} for chat_id {chat_id}.")
 
     symbol_info = mt5.symbol_info(symbol)
     if not symbol_info:
@@ -458,6 +461,11 @@ def place_market_order(signal_type: str, symbol: str, lot_size: float, sl_price:
         logger.warning(f"Invalid order type specified: {signal_type}")
         return f"❌ **Order Failed**: Invalid order type '{signal_type}'."
 
+    # If mode is ha_ma, TP is dynamic, so set it to 0.0 to disable it.
+    if mode == 'ha_ma':
+        tp_price = 0.0
+        logger.info(f"Order mode is 'ha_ma'. Setting TP to 0.0 for dynamic management.")
+
     # Verify that the prices are properly rounded to the symbol's digits
     sl_price = round(sl_price, symbol_info.digits)
     tp_price = round(tp_price, symbol_info.digits)
@@ -472,7 +480,7 @@ def place_market_order(signal_type: str, symbol: str, lot_size: float, sl_price:
         "tp": tp_price,
         "deviation": 20, # Allowed slippage in points
         "magic": 234000, # A magic number to identify orders from this bot
-        "comment": "Telegram Signal Bot",
+        "comment": f"Telegram Signal Bot - {mode}",
         "type_time": mt5.ORDER_TIME_GTC, # Good till cancelled
         "type_filling": mt5.ORDER_FILLING_IOC, # Immediate or Cancel
     }
@@ -484,6 +492,9 @@ def place_market_order(signal_type: str, symbol: str, lot_size: float, sl_price:
             return f"❌ **Order Failed** for {symbol}.\nReason: {result.comment} (Code: {result.retcode})"
         else:
             logger.info(f"Order successful for {symbol}. Ticket: {result.order}, Price: {result.price}, Volume: {result.volume}")
+            # Store the mapping of ticket to chat_id for future notifications
+            trade_to_chat_id[result.order] = chat_id
+            logger.info(f"Stored mapping for ticket {result.order} to chat_id {chat_id}")
             return (f"✅ **Order Successful!**\n\n"
                     f"🔹 **Symbol:** {symbol}\n"
                     f"🔹 **Type:** {signal_type}\n"
@@ -492,6 +503,59 @@ def place_market_order(signal_type: str, symbol: str, lot_size: float, sl_price:
     except Exception as e:
         logger.error(f"An exception occurred while placing order for {symbol}: {e}")
         return f"❌ **Order Failed**: An unexpected error occurred: {e}"
+
+
+def close_position(position, reason: str) -> bool:
+    """
+    Closes an open position on MetaTrader 5.
+    """
+    symbol = position.symbol
+    volume = position.volume
+    ticket = position.ticket
+    order_type = position.type
+
+    logger.info(f"Attempting to close position #{ticket} for {symbol} ({volume} lots). Reason: {reason}")
+
+    # Determine the closing order type and price
+    if order_type == mt5.ORDER_TYPE_BUY:
+        close_order_type = mt5.ORDER_TYPE_SELL
+        price = mt5.symbol_info_tick(symbol).bid
+    elif order_type == mt5.ORDER_TYPE_SELL:
+        close_order_type = mt5.ORDER_TYPE_BUY
+        price = mt5.symbol_info_tick(symbol).ask
+    else:
+        logger.error(f"Unknown order type {order_type} for ticket {ticket}.")
+        return False
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": volume,
+        "type": close_order_type,
+        "position": ticket,
+        "price": price,
+        "deviation": 20,
+        "magic": 234000,
+        "comment": reason,
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+
+    try:
+        result = mt5.order_send(request)
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.error(f"Failed to close position {ticket}. Code: {result.retcode}, Comment: {result.comment}")
+            return False
+        else:
+            logger.info(f"Successfully closed position {ticket}. Result: {result}")
+            # Remove the trade from our tracking dictionary
+            if ticket in trade_to_chat_id:
+                del trade_to_chat_id[ticket]
+                logger.info(f"Removed ticket {ticket} from tracking dictionary.")
+            return True
+    except Exception as e:
+        logger.error(f"An exception occurred while closing position {ticket}: {e}")
+        return False
 
 
 # --- Telegram Command Handlers ---
@@ -860,7 +924,9 @@ async def lot_size_input(update: Update, context) -> int:
         symbol=signal['symbol'],
         lot_size=lot_size,
         sl_price=signal['sl'],
-        tp_price=signal['tp']
+        tp_price=signal['tp'],
+        mode=signal['mode'],
+        chat_id=update.message.chat_id
     )
 
     await update.message.reply_text(trade_result, parse_mode='Markdown')
@@ -1177,17 +1243,19 @@ async def mode_callback(update: Update, context) -> None:
 
 async def check_all_monitored_pairs_job(context) -> None:
     """
-    This job iterates through all monitored pairs, checks for signals, filters
-    them based on each user's mode, and then either executes a trade
-    automatically or sends a notification.
+    This job first manages open positions, then iterates through all monitored
+    pairs to check for new signals.
     """
+    # First, manage existing positions based on dynamic TP rules
+    await check_and_manage_open_positions(context)
+
     if not mt5.terminal_info().connected:
         logger.warning("Job running, but MT5 is not connected. Attempting to reconnect.")
         if not initialize_mt5():
             logger.error("Job failed to reconnect to MT5. Skipping this run.")
             return
 
-    logger.info("Running scheduled job: Checking all monitored pairs...")
+    logger.info("Running scheduled job: Checking for new signals...")
 
     # Create a copy of the items to avoid issues if the dict is modified during iteration
     # Get a unique list of all symbols being monitored to avoid re-checking the same symbol
@@ -1219,7 +1287,9 @@ async def check_all_monitored_pairs_job(context) -> None:
                                 symbol=signal['symbol'],
                                 lot_size=0.01,
                                 sl_price=signal['sl'],
-                                tp_price=signal['tp']
+                                tp_price=signal['tp'],
+                                mode=signal['mode'],
+                                chat_id=chat_id
                             )
                             auto_trade_message = f"🤖 **Auto-Trade Executed** for {symbol}.\n\n{trade_result}"
                             await context.bot.send_message(chat_id=chat_id, text=auto_trade_message, parse_mode='Markdown')
@@ -1242,6 +1312,88 @@ async def check_all_monitored_pairs_job(context) -> None:
 
             except Exception as e:
                 logger.error(f"Error checking signal for {symbol} for chat_id {chat_id}: {e}")
+
+
+async def check_and_manage_open_positions(context) -> None:
+    """
+    Checks all open positions and closes them if the reverse MA-crossover signal appears.
+    This only applies to trades opened with the 'ha_ma' strategy.
+    """
+    try:
+        positions = mt5.positions_get()
+        if positions is None or len(positions) == 0:
+            return  # No open positions to manage
+
+        logger.info(f"Managing {len(positions)} open position(s)...")
+
+        # Iterate over a copy, as the underlying list of positions can change.
+        for position in list(positions):
+            # Filter for trades managed by this bot and by the dynamic TP strategy
+            if position.magic != 234000 or "ha_ma" not in position.comment:
+                continue
+
+            symbol = position.symbol
+            logger.info(f"Checking dynamic TP for position #{position.ticket} on {symbol}.")
+
+            # Get fresh data to check for crossover
+            rates_df = get_price_data(symbol, TIMEFRAME, count=SLOW_MA_PERIOD + 5)
+            if rates_df is None or len(rates_df) < SLOW_MA_PERIOD + 3:
+                logger.warning(f"Not enough data to manage position #{position.ticket} on {symbol}.")
+                continue
+
+            rates_df = calculate_indicators(rates_df)
+
+            # We need at least two candles with MAs to check for a cross
+            if rates_df['slow_ma'].isna().sum() > len(rates_df) - 3:
+                logger.warning(f"Not enough MA data to manage position #{position.ticket} on {symbol}.")
+                continue
+
+            last_candle = rates_df.iloc[-2]
+            prev_candle = rates_df.iloc[-3]
+
+            close_condition_met = False
+            reason = ""
+
+            # Check for bearish cross to close a BUY position
+            if position.type == mt5.ORDER_TYPE_BUY:
+                is_bearish_cross = prev_candle['fast_ma'] >= prev_candle['slow_ma'] and last_candle['fast_ma'] < last_candle['slow_ma']
+                if is_bearish_cross:
+                    close_condition_met = True
+                    reason = "Dynamic TP hit (Bearish MA Crossover)"
+
+            # Check for bullish cross to close a SELL position
+            elif position.type == mt5.ORDER_TYPE_SELL:
+                is_bullish_cross = prev_candle['fast_ma'] <= prev_candle['slow_ma'] and last_candle['fast_ma'] > last_candle['slow_ma']
+                if is_bullish_cross:
+                    close_condition_met = True
+                    reason = "Dynamic TP hit (Bullish MA Crossover)"
+
+            if close_condition_met:
+                logger.info(f"Closing condition met for position #{position.ticket}. Reason: {reason}")
+
+                trade_type_str = "BUY" if position.type == mt5.ORDER_TYPE_BUY else "SELL"
+                chat_id = trade_to_chat_id.get(position.ticket)
+
+                if close_position(position, reason):
+                    logger.info(f"Successfully closed position #{position.ticket} via dynamic TP.")
+                    if chat_id:
+                        message = (
+                            f"✅ **Position Closed Automatically**\n\n"
+                            f"🔹 **Symbol:** {symbol}\n"
+                            f"🔹 **Type:** {trade_type_str}\n"
+                            f"🔹 **Ticket:** {position.ticket}\n"
+                            f"🔹 **Reason:** {reason}"
+                        )
+                        try:
+                            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+                        except Exception as e:
+                            logger.error(f"Failed to send closure notification to chat_id {chat_id} for ticket {position.ticket}: {e}")
+                    else:
+                        logger.warning(f"Could not find chat_id for closed ticket {position.ticket} to send notification.")
+                else:
+                    logger.error(f"Failed to execute closure for position #{position.ticket} despite condition being met.")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred in check_and_manage_open_positions: {e}")
 
 
 # --- Main Bot Logic ---
