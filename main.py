@@ -852,7 +852,7 @@ async def check_all_monitored_pairs_job(context) -> None:
 
 # --- Main Bot Logic ---
 
-async def main() -> None:
+def main() -> None:
     """Start the telegram bot."""
     # Initialize MT5
     if not initialize_mt5():
@@ -916,7 +916,7 @@ async def main() -> None:
     logger.info("Scheduled monitoring job to run every 5 minutes.")
 
     # Start the Bot
-    await application.run_polling()
+    application.run_polling()
     logger.info("Bot has started successfully.")
 
     # Run the bot until the user presses Ctrl-C
@@ -930,4 +930,4 @@ async def main() -> None:
     # logger.info("MetaTrader 5 connection shut down.")
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
