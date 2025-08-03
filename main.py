@@ -502,9 +502,18 @@ async def start(update: Update, context) -> None:
     welcome_message = f"👋 Hello {user.first_name}!\n\nI am your Forex Signal & Trading Bot. Please choose an option below to begin."
 
     keyboard = [
-        [InlineKeyboardButton("📊 Get Signal", callback_data='menu_signal')],
-        [InlineKeyboardButton("⚙️ Setup Monitoring", callback_data='menu_monitor')],
-        [InlineKeyboardButton("📈 Account Status", callback_data='menu_status')],
+        [
+            InlineKeyboardButton("📊 Get Signal", callback_data='menu_signal'),
+            InlineKeyboardButton("📈 Account Status", callback_data='menu_status')
+        ],
+        [
+            InlineKeyboardButton("⚙️ Monitoring", callback_data='menu_monitor'),
+            InlineKeyboardButton("📉 PnL Check", callback_data='menu_pnl')
+        ],
+        [
+            InlineKeyboardButton("🤖 Auto-Trade", callback_data='menu_autotrade'),
+            InlineKeyboardButton("🔧 Signal Mode", callback_data='menu_mode')
+        ],
         [InlineKeyboardButton("❓ Help", callback_data='menu_help')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -552,14 +561,51 @@ async def help_command(update: Update, context) -> None:
         await update.message.reply_text(text=help_message, reply_markup=reply_markup, parse_mode='Markdown')
 
 
+async def autotrade_menu(update: Update, context) -> None:
+    """Shows autotrade status and toggle buttons."""
+    chat_id = update.effective_chat.id
+    settings = get_user_settings(chat_id)
+    status = "ENABLED" if settings.get('auto_trade', False) else "DISABLED"
+
+    message = f"🤖 Auto-trading is currently **{status}**.\n\n" \
+              "When enabled, I will execute trades automatically with a lot size of 0.01. " \
+              "When disabled, I will ask for confirmation."
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Enable", callback_data='autotrade_on'),
+            InlineKeyboardButton("❌ Disable", callback_data='autotrade_off')
+        ],
+        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data='menu_start')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # This function is triggered by a button press, so we edit the message.
+    await update.callback_query.edit_message_text(
+        text=message,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+
 async def set_mode(update: Update, context) -> None:
-    """Displays an inline keyboard for the user to select a signal mode."""
+    """Displays an inline keyboard for the user to select a signal mode. Handles both commands and callbacks."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+
     keyboard = [
         [InlineKeyboardButton("Mode 1: HA + MA Crossover", callback_data='mode_ha_ma')],
         [InlineKeyboardButton("Mode 2: Pure Heikin Ashi", callback_data='mode_pure_ha')],
+        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data='menu_start')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('Please choose your preferred signal mode:', reply_markup=reply_markup)
+    text = 'Please choose your preferred signal mode:'
+
+    if query:
+        await query.edit_message_text(text=text, reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(text=text, reply_markup=reply_markup)
 
 
 async def mode_status(update: Update, context) -> None:
@@ -575,21 +621,35 @@ async def mode_status(update: Update, context) -> None:
 
 
 async def autotrade_on(update: Update, context) -> None:
-    """Enables auto-trading for the user."""
-    chat_id = update.message.chat_id
+    """Enables auto-trading for the user. Handles both commands and callbacks."""
+    chat_id = update.effective_chat.id
     settings = get_user_settings(chat_id)
     settings['auto_trade'] = True
     logger.info(f"Auto-trading enabled for chat_id: {chat_id}")
-    await update.message.reply_text("🤖 Auto-trading has been **ENABLED**. I will now execute trades automatically with a lot size of 0.01.")
+    message_text = "🤖 Auto-trading has been **ENABLED**. I will now execute trades automatically with a lot size of 0.01."
+
+    if update.callback_query:
+        # User came from a button press, so edit the message.
+        await update.callback_query.edit_message_text(text=message_text, parse_mode='Markdown')
+    else:
+        # User sent a command, so reply.
+        await update.message.reply_text(text=message_text, parse_mode='Markdown')
 
 
 async def autotrade_off(update: Update, context) -> None:
-    """Disables auto-trading for the user."""
-    chat_id = update.message.chat_id
+    """Disables auto-trading for the user. Handles both commands and callbacks."""
+    chat_id = update.effective_chat.id
     settings = get_user_settings(chat_id)
     settings['auto_trade'] = False
     logger.info(f"Auto-trading disabled for chat_id: {chat_id}")
-    await update.message.reply_text("🤖 Auto-trading has been **DISABLED**. I will ask for confirmation before placing trades.")
+    message_text = "🤖 Auto-trading has been **DISABLED**. I will ask for confirmation before placing trades."
+
+    if update.callback_query:
+        # User came from a button press, so edit the message.
+        await update.callback_query.edit_message_text(text=message_text, parse_mode='Markdown')
+    else:
+        # User sent a command, so reply.
+        await update.message.reply_text(text=message_text, parse_mode='Markdown')
 
 
 async def autotrade_status(update: Update, context) -> None:
@@ -637,19 +697,32 @@ async def account_status(update: Update, context) -> None:
 
 
 async def pnl_command(update: Update, context) -> None:
-    """Starts the conversation to check PnL for a specific order."""
+    """Starts the conversation to check PnL for a specific order. Handles both commands and callbacks."""
+    message = update.effective_message
+    query = update.callback_query
+
+    if query:
+        await query.answer()
+
+    # Ensure MT5 connection
     if not mt5.terminal_info().connected:
         if not initialize_mt5():
-            await update.message.reply_text("❌ Could not connect to the trading server. Please try again later.")
+            text = "❌ Could not connect to the trading server. Please try again later."
+            if query: await query.edit_message_text(text)
+            else: await message.reply_text(text)
             return
 
     positions = mt5.positions_get()
     if positions is None:
-        await update.message.reply_text("❌ Failed to retrieve open positions. The connection might have been lost.")
+        text = "❌ Failed to retrieve open positions. The connection might have been lost."
+        if query: await query.edit_message_text(text)
+        else: await message.reply_text(text)
         return
 
     if not positions:
-        await update.message.reply_text("ℹ️ You have no open orders to check.")
+        text = "ℹ️ You have no open orders to check."
+        if query: await query.edit_message_text(text)
+        else: await message.reply_text(text)
         return
 
     keyboard = []
@@ -659,8 +732,17 @@ async def pnl_command(update: Update, context) -> None:
         callback_data = f"pnl_{pos.ticket}"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
 
+    # Add a back button if called from a menu for better navigation
+    if query:
+        keyboard.append([InlineKeyboardButton("⬅️ Back to Main Menu", callback_data='menu_start')])
+
+
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Please select an order to check its PnL:", reply_markup=reply_markup)
+    text = "Please select an order to check its PnL:"
+    if query:
+        await query.edit_message_text(text=text, reply_markup=reply_markup)
+    else:
+        await message.reply_text(text=text, reply_markup=reply_markup)
 
 
 async def pnl_callback(update: Update, context) -> None:
@@ -1176,6 +1258,12 @@ async def main_menu_handler(update: Update, context) -> None:
         await monitor_command(update, context)
     elif query.data == 'menu_start':
         await start(update, context)
+    elif query.data == 'menu_pnl':
+        await pnl_command(update, context)
+    elif query.data == 'menu_autotrade':
+        await autotrade_menu(update, context)
+    elif query.data == 'menu_mode':
+        await set_mode(update, context)
     # The 'menu_signal' is handled by the ConversationHandler entry point now
 
 
@@ -1235,6 +1323,10 @@ def main() -> None:
 
     # This handler processes PnL button clicks
     application.add_handler(CallbackQueryHandler(pnl_callback, pattern='^pnl_'))
+
+    # These handlers correspond to the buttons in the autotrade_menu
+    application.add_handler(CallbackQueryHandler(autotrade_on, pattern='^autotrade_on$'))
+    application.add_handler(CallbackQueryHandler(autotrade_off, pattern='^autotrade_off$'))
 
     # Set up the conversation handler for placing trades
     trade_conv_handler = ConversationHandler(
